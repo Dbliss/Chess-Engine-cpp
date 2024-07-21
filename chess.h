@@ -6,6 +6,18 @@
 #include <algorithm>
 #include <iostream>
 #include <cstdint>
+#include <chrono>
+#include <string>
+#include <deque>
+#include <random>
+#include "zobrist.h"
+#include <tuple>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <cstdint>
 
 typedef uint64_t Bitboard;
 
@@ -32,6 +44,10 @@ public:
         return from == other.from && to == other.to && promotion == other.promotion &&
             isCapture == other.isCapture && capturedPiece == other.capturedPiece;
     }
+
+    bool operator!=(const Move& other) const {
+        return !(*this == other);
+    }
 };
 
 extern const Move NO_MOVE;
@@ -39,7 +55,8 @@ extern const Move NO_MOVE;
 enum TTFlag {
     HASH_FLAG_EXACT,  // Exact score
     HASH_FLAG_LOWER,  // Lower bound score
-    HASH_FLAG_UPPER   // Upper bound score
+    HASH_FLAG_UPPER,  // Upper bound score
+    HASH_BOOK
 };
 
 struct TT_Entry { 
@@ -47,10 +64,9 @@ struct TT_Entry {
     Move move;        // Best move from this position
     int score;        // Evaluation score
     int depth;        // Depth at which the position was evaluated
-    int evaluation;   // Static evaluation of the position
     TTFlag flag;      // Type of node
 
-    TT_Entry() : key(0), score(0), depth(0), evaluation(0), flag(HASH_FLAG_EXACT), move(NO_MOVE) {}
+    TT_Entry() : key(0), score(0), depth(0), flag(HASH_FLAG_EXACT), move(NO_MOVE) {}
 };
 
 
@@ -71,6 +87,15 @@ public:
     Bitboard whitePieces;
     Bitboard blackPieces;
     Bitboard enPassantTarget;
+
+    Bitboard enPassantPrev;
+    bool whiteKingMovedPrev;
+    bool whiteLRookMovedPrev;
+    bool whiteRRookMovedPrev;
+    bool blackKingMovedPrev;
+    bool blackLRookMovedPrev;
+    bool blackRRookMovedPrev;
+
     bool whiteToMove;
 
     bool whiteKingMoved;
@@ -81,7 +106,10 @@ public:
     bool blackLRookMoved;
     bool blackRRookMoved;
 
+    Move lastMove;
+
     std::unordered_map<uint64_t, int> positionHistory;
+    Move killerMoves[2][64]; // Two killer moves per depth, up to depth of 64
 
     Board();
     void createBoard();
@@ -101,7 +129,8 @@ public:
     char getPieceAt(int index) const;
 
     void updatePositionHistory(bool plus);
-    bool isThreefoldRepetition(bool print);
+    bool isThreefoldRepetition();
+    bool isThreefoldRepetition(uint64_t hash);
     int getPieceIndex(char piece) const;
     int getEnPassantFile() const;
     uint64_t generateZobristHash() const;
@@ -109,10 +138,15 @@ public:
     std::vector<TT_Entry> transposition_table;
     void resize_tt(uint64_t mb);
     void clear_tt();
-    void record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move, int depth, int evaluation);
+    void record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move, int depth);
     void configureTranspositionTableSize(uint64_t sizeInMB);
     short probe_tt_entry(uint64_t hash_key, int alpha, int beta, int depth, TT_Entry& return_entry);
     TT_Entry* probeTranspositionTable(uint64_t hash);
+    size_t countTranspositionTableEntries() const;
+    void makeNullMove();
+    void undoNullMove();
+
+    void loadOpeningBook();
 };
 
 // Helper functions
@@ -122,3 +156,5 @@ std::string numToBoardPosition(int num);
 std::vector<Move> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
 bool isTacticalPosition(std::vector<Move> moves, Board board);
 bool isNullViable(Board& board);
+Move convertToMoveObject(const std::string& moveStr);
+int boardPositionToIndex(const std::string& pos);

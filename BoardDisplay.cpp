@@ -1,8 +1,19 @@
 #include "BoardDisplay.h"
 #include <iostream>
 
+
+bool isCaptureMove(Move legalMove) {
+    if (legalMove.isCapture) {
+        return true;
+    }
+    else {
+        return false;
+    }
+}
+
 BoardDisplay::BoardDisplay() {
     loadTextures();
+    loadSounds();
 }
 
 void BoardDisplay::loadTextures() {
@@ -20,6 +31,19 @@ void BoardDisplay::loadTextures() {
         !blackKingTexture.loadFromFile("images/Chess_kdt60.png")) {
         std::cerr << "Error loading piece textures" << std::endl;
     }
+}
+
+void BoardDisplay::loadSounds() {
+    if (!moveBuffer.loadFromFile("recordings/bonk.wav") ||
+        !checkBuffer.loadFromFile("recordings/check.wav") ||
+        !checkmateBuffer.loadFromFile("recordings/checkmate.wav") ||
+        !captureBuffer.loadFromFile("recordings/capture.wav")) {
+        std::cerr << "Error loading sound files" << std::endl;
+    }
+    moveSound.setBuffer(moveBuffer);
+    checkSound.setBuffer(checkBuffer);
+    checkmateSound.setBuffer(checkmateBuffer);
+    captureSound.setBuffer(captureBuffer);
 }
 
 void BoardDisplay::setupPieces(Board& board) {
@@ -46,13 +70,43 @@ void BoardDisplay::setupPieces(Board& board) {
         }
         sprite.setPosition(x * tileSize, (7 - y) * tileSize); // Adjust for bottom-to-top indexing
         pieces.push_back(sprite);
+
+        bool isCapture = isCaptureMove(board.lastMove);
+        bool isCheck = false;
+        bool isCheckmate = false;
+
+        if (board.amIInCheck(board.whiteToMove)) {
+            std::vector<Move> moves2 = board.generateAllMoves();
+            if (size(moves2) == 0) {
+                isCheckmate = true;
+            }
+            else {
+                isCheck = true;
+            }
+        }
+
+        // Play the corresponding sound
+        if (isCheckmate) {
+            checkmateSound.play();
+        }
+        else if (isCheck) {
+            checkSound.play();
+        }
+        else if (isCapture) {
+            captureSound.play();
+        }
+        else {
+            moveSound.play();
+        }
+        
     }
 }
 
-void BoardDisplay::updatePieces(Board& board) {
-    setupPieces(board);
-}
+void BoardDisplay::updatePieces(sf::RenderWindow& window, Board& board) {
+    setupPieces(board);  // Sets up the pieces based on the current board state
 
+    draw(window, board);  // Call the overloaded draw function to immediately reflect changes
+}
 void BoardDisplay::draw(sf::RenderWindow& window) {
     // Draw checkered background
     for (int y = 0; y < 8; ++y) {
@@ -60,6 +114,31 @@ void BoardDisplay::draw(sf::RenderWindow& window) {
             sf::RectangleShape square(sf::Vector2f(tileSize, tileSize));
             square.setPosition(x * tileSize, y * tileSize);
             if ((x + y) % 2 == 0) {
+                square.setFillColor(lightColor);
+            }
+            else {
+                square.setFillColor(darkColor);
+            }
+            window.draw(square);
+        }
+    }
+
+    // Draw pieces
+    for (auto& piece : pieces) {
+        window.draw(piece);
+    }
+}
+
+void BoardDisplay::draw(sf::RenderWindow& window, Board& board) {
+    // Draw checkered background
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            sf::RectangleShape square(sf::Vector2f(tileSize, tileSize));
+            square.setPosition(x * tileSize, y * tileSize);
+            if (board.lastMove.from == (8*(8-y) + (8-x))) {
+                square.setFillColor(lastMoveColor);
+            }
+            else if ((x + y) % 2 == 0) {
                 square.setFillColor(lightColor);
             }
             else {
@@ -105,10 +184,13 @@ bool BoardDisplay::handleMove(sf::RenderWindow& window, Board& board) {
                 for (Move& legalMove : legalMoves) {
                     if (legalMove.from == from && legalMove.to == to) {
                         board.makeMove(legalMove);
+                        board.lastMove = legalMove;
                         board.printBoard();
-                        updatePieces(board);
+                        updatePieces(window, board);
+
                         firstClick = sf::Vector2i(-1, -1);
                         secondClick = sf::Vector2i(-1, -1);
+
                         return true;
                     }
                 }

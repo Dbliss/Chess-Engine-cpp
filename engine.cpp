@@ -2,6 +2,7 @@
 #include <iostream>
 #include <chrono>
 
+std::chrono::time_point<std::chrono::high_resolution_clock> endTime;
 
 const int64_t pawn_pcsq[64] = {
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -69,7 +70,6 @@ const int64_t king_endgame_pcsq[64] = {
     -40, -30, -20, -10, -10, -20, -30, -40
 };
 
-
 unsigned int ctzll2(unsigned long long x) {
     unsigned long index; // Variable to store the result
     // _BitScanForward64 returns 0 if x is zero, so handle this case:
@@ -92,24 +92,42 @@ int kingDistance(uint64_t king1, uint64_t king2) {
 }
 
 double_t evaluate(Board& board) {
+    // Check for draw condition based on insufficient material
+    if ((std::_Popcount(board.whitePieces) == 1) && (std::_Popcount(board.blackPieces) == 1)) {
+        return 0; // Return 0 to indicate a draw
+    }
     double_t result = 0;
 
     const double_t pawnValue = 100;
-    const double_t knightValue = 300;
-    const double_t bishopValue = 300;
-    const double_t rookValue = 550;
-    const double_t queenValue = 950;
+    const double_t knightValue = 325;
+    const double_t bishopValue = 325;
+    const double_t rookValue = 500;
+    const double_t queenValue = 975;
 
     int numWhitePawns = std::_Popcount(board.whitePawns);
     int numWhiteBishops = std::_Popcount(board.whiteBishops);
+    int numWhiteKnights = std::_Popcount(board.whiteKnights);
     int numWhiteRooks = std::_Popcount(board.whiteRooks);
     int numWhiteQueens = std::_Popcount(board.whiteQueens);
 
     int numBlackPawns = std::_Popcount(board.blackPawns);
     int numBlackBishops = std::_Popcount(board.blackBishops);
+    int numBlackKnights = std::_Popcount(board.blackKnights);
     int numBlackRooks = std::_Popcount(board.blackRooks);
     int numBlackQueens = std::_Popcount(board.blackQueens);
 
+    // Encourage draws if both sides have no pawns or major pieces left and only up to one minor piece each.
+    if (!numWhitePawns && !numBlackPawns &&
+        !numWhiteQueens && !numBlackQueens &&
+        !numWhiteRooks && !numBlackRooks &&
+        (numWhiteBishops + numWhiteKnights <= 1) &&
+        (numBlackBishops + numBlackKnights <= 1)) {
+
+        // If both sides have at most one minor piece each, this is a draw
+        if (numWhiteBishops + numWhiteKnights + numBlackBishops + numBlackKnights <= 2) {
+            return board.whiteToMove ? -5 : 5;
+        }
+    }
 
     // Define file masks
     Bitboard fileMasks[8] = {
@@ -121,7 +139,7 @@ double_t evaluate(Board& board) {
     int pawnProgressBonus[8] = { 0, 10, 20, 30, 50, 70, 90, 0 }; // No bonus on rank 1 and rank 8
 
     // Define passed pawn bonus
-    int passedPawnBonus[8] = { 0, 20, 40, 60, 80, 100, 120, 0 }; // No bonus on rank 1 and rank 8
+    int passedPawnBonus[8] = { 0, 10, 20, 30, 50, 70, 90, 0 }; // No bonus on rank 1 and rank 8
 
     // Rank masks
     Bitboard rankMasks[12] = {
@@ -132,13 +150,13 @@ double_t evaluate(Board& board) {
     // Calculate the game phase (0-1)
     const double_t totalMaterial = 16 * pawnValue + 4 * knightValue + 4 * bishopValue + 4 * rookValue + 2 * queenValue;
     double_t whiteMaterial = numWhitePawns * pawnValue +
-        std::_Popcount(board.whiteKnights) * knightValue +
+        numWhiteKnights * knightValue +
         numWhiteBishops * bishopValue +
         numWhiteRooks * rookValue +
         numWhiteQueens * queenValue;
 
     double_t blackMaterial = numBlackPawns * pawnValue +
-        std::_Popcount(board.blackKnights) * knightValue +
+        numBlackKnights * knightValue +
         numBlackBishops * bishopValue +
         numBlackRooks * rookValue +
         numBlackQueens * queenValue;
@@ -255,6 +273,22 @@ double_t evaluate(Board& board) {
             result -= pawnStormBonus[rank] * std::_Popcount(blackRankPawns);
         }
         
+        // estimate how safe king is by how many queen moves
+        int whiteKingProxyMoves = size(board.generateQueenMoves(board.whiteKing, board.whitePieces, board.blackPieces));
+        if (whiteKingProxyMoves <= 1) {
+            result -= (2 - whiteKingProxyMoves) * 16;
+        }
+        else if (whiteKingProxyMoves > 3) {
+            result -= whiteKingProxyMoves * 5;
+        }
+        int blackKingProxyMoves = size(board.generateQueenMoves(board.blackKing, board.blackPieces, board.whitePieces));
+        if (blackKingProxyMoves <= 1) {
+            result += (2 - blackKingProxyMoves) * 16;
+        }
+        else if (blackKingProxyMoves > 3) {
+            result += blackKingProxyMoves * 5;
+        }
+        
     }
 
     // Calculate white pieces' value and positional value
@@ -349,13 +383,13 @@ double_t evaluate(Board& board) {
             // Lead is expanded as game goes on, incentives trading
             result = result * (1 + gamePhase / 2.5);
 
-            // Incentivise pushing kings together when endgame
-            int distBetweenKings = 7 - kingDistance(board.blackKing, board.whiteKing); // smaller is better
+            int distBetweenKingsBonus[9] = { 0, 0, 140, 80, 40, 20, 0, -10, -20 };
+            int distBetweenKings = kingDistance(board.blackKing, board.whiteKing); // smaller is better
             if (result > 0) {
-                result += 30 * distBetweenKings;
+                result += distBetweenKingsBonus[distBetweenKings];
             }
             else {
-                result -= 30 * distBetweenKings;
+                result -= distBetweenKingsBonus[distBetweenKings];
             }
         }  
     }
@@ -394,7 +428,6 @@ double_t quiescenceSearch(Board& board, double_t alpha, double_t beta) {
 
     double_t stand_pat = evaluate(board);
     if (stand_pat >= beta) {
-        board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, Move(), 0, stand_pat);
         return beta;
     }
     if (alpha < stand_pat) {
@@ -421,7 +454,6 @@ double_t quiescenceSearch(Board& board, double_t alpha, double_t beta) {
 
     for (Move& move : moves) {
         board.makeMove(move);
-        board.updatePositionHistory(true);
 
         if (!board.isThreefoldRepetition(false)) {
             subBestScore = -quiescenceSearch(board, -beta, -alpha);
@@ -430,7 +462,6 @@ double_t quiescenceSearch(Board& board, double_t alpha, double_t beta) {
             subBestScore = 0;
         }
 
-        board.updatePositionHistory(false);
         board.enPassantTarget = store;
         board.whiteKingMoved = whiteKingMovedStore;
         board.whiteLRookMoved = whiteLRookMovedStore;
@@ -441,15 +472,15 @@ double_t quiescenceSearch(Board& board, double_t alpha, double_t beta) {
         board.undoMove(move);
 
         if (subBestScore >= beta) {
-            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, 0, stand_pat);
             return beta;
         }
         if (subBestScore > alpha) {
             alpha = subBestScore;
         }
+        if (alpha >= beta) {
+            break;
+        }
     }
-
-    board.record_tt_entry(hash, alpha, HASH_FLAG_UPPER, Move(), 0, stand_pat);
     return alpha;
 }
 
@@ -515,25 +546,35 @@ int perftHelper(Board& board, int depth, int startDepth) {
     return { totalMoves };
 }
 
-std::tuple<Move, double_t> engine(Board& board, int depth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves) {
+std::tuple<Move, double_t> engine(Board& board, int depth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, double_t alpha, double_t beta) {
     double bestScore;
     Move bestMove;
-    std::tie(bestMove, bestScore) = engineHelper(board, depth, -100000, 100000, depth, iterativeDeepeningMoves, 0, false);
+    std::tie(bestMove, bestScore) = engineHelper(board, depth, alpha, beta, depth, iterativeDeepeningMoves, 0, false);
     return { bestMove, bestScore };
 }
 
 std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha, double_t beta, int startDepth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, int totalExtensions, bool lastIterationNull) {
+    if (std::chrono::high_resolution_clock::now() > endTime) {
+        return { Move(), -1.2345 };
+    }
+    
     const int MAX_EXTENSIONS = 3;
     const int MAX_EXTENSION_DEPTH = 3;
+    const double_t INITIAL_WINDOW = 50.0; // Initial aspiration window value
     int extension = 0;
     
     uint64_t hash = board.generateZobristHash();
     TT_Entry* ttEntry = board.probeTranspositionTable(hash);
 
-    if (ttEntry->key == hash && ttEntry->depth >= depth) {
-        if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return { ttEntry->move, ttEntry->score };
-        if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER && ttEntry->score >= beta) return { ttEntry->move, ttEntry->score };
-        if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER && ttEntry->score <= alpha) return { ttEntry->move, ttEntry->score };
+    if (ttEntry->key == hash) {
+        if (depth == startDepth && ttEntry->flag == TTFlag::HASH_BOOK) {
+            return { ttEntry->move, 0 };
+        }
+        else if (ttEntry->depth >= depth) {
+            if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return { ttEntry->move, ttEntry->score };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER && ttEntry->score >= beta) return { ttEntry->move, ttEntry->score };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER && ttEntry->score <= alpha) return { ttEntry->move, ttEntry->score };
+        }
     }
 
     std::vector<Move> moves;
@@ -558,15 +599,14 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
         }
         moves = orderMoves(board, moves, ttEntry, depth);
     }
-    /**
+    
     // Null Move Pruning
-    if (!board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull) {
-        board.whiteToMove = !board.whiteToMove;
-        int R = std::max(2, depth / 3); // Dynamic reduction factor
+    if (!board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull && depth != startDepth) {
+        board.makeNullMove();
+        int R = 2;
         std::tuple<Move, double_t> result = engineHelper(board, depth - 1 - R, -beta, -beta + 1, startDepth, iterativeDeepeningMoves, totalExtensions, true);
         double_t nullMoveEvaluation = -std::get<1>(result);
-
-        board.whiteToMove = !board.whiteToMove;
+        board.undoNullMove();
 
         // null move cutoff
         if (nullMoveEvaluation >= beta) {
@@ -580,7 +620,7 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
             }
         }
     }
-    */
+    
 
     Move bestMove;
     double_t bestScore = -100000;
@@ -598,9 +638,8 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
     for (int i = 0; i < size(moves); i++) {
         Move& move = moves[i];
         board.makeMove(move);
-        board.updatePositionHistory(true);
 
-        if (!board.isThreefoldRepetition(false)) {
+        if (!board.isThreefoldRepetition()) {
             bool needsFullSearch = true;
             // Lets do a reduced depth search for the less promising moves
             if (i >= 3 && extension == 0 && depth >= 4 && !move.isCapture) {
@@ -626,7 +665,6 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
         else {
             subBestScore = 0;
         }
-        board.updatePositionHistory(false);
         board.enPassantTarget = store;
         board.whiteKingMoved = whiteKingMovedStore;
         board.whiteLRookMoved = whiteLRookMovedStore;
@@ -635,12 +673,17 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
         board.blackLRookMoved = blackLRookMovedStore;
         board.blackRRookMoved = blackRRookMovedStore;
         board.undoMove(move);
+
+        if (subBestScore == 1.2345) {
+            return { Move(), -1.2345 };
+        }
+
         if (depth == startDepth) {
             moveScores.emplace_back(move, subBestScore);
         }
 
         if (subBestScore >= beta) {
-            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, depth, evaluate(board));
+            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, depth);
             return { move, beta };
         }
 
@@ -658,6 +701,8 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
         }
     }
 
+
+
     if (depth == startDepth) {
         // Sort moves based on scores for next iterative deepening step
         std::sort(moveScores.begin(), moveScores.end(), [](const std::tuple<Move, double_t>& a, const std::tuple<Move, double_t>& b) {
@@ -666,8 +711,8 @@ std::tuple<Move, double_t> engineHelper(Board& board, int depth, double_t alpha,
         iterativeDeepeningMoves = moveScores; // Update iterativeDeepeningMoves for next iteration
     }
 
-    TTFlag flag = (bestScore <= alpha) ? HASH_FLAG_UPPER : (bestScore >= beta) ? HASH_FLAG_LOWER : HASH_FLAG_EXACT;
-    board.record_tt_entry(hash, bestScore, flag, bestMove, depth, evaluate(board));
+    TTFlag flag = (bestScore <= alpha) ? HASH_FLAG_UPPER : HASH_FLAG_EXACT;
+    board.record_tt_entry(hash, bestScore, flag, bestMove, depth);
 
     return { bestMove, bestScore };
 }

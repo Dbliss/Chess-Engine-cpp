@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <tuple>
 
-
+std::chrono::time_point<std::chrono::high_resolution_clock> endTime2;
 
 const int64_t pawn_pcsq[64] = {
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -74,7 +74,6 @@ const int64_t king_endgame_pcsq[64] = {
     -40, -30, -20, -10, -10, -20, -30, -40
 };
 
-
 unsigned int ctzll3(unsigned long long x) {
     unsigned long index; // Variable to store the result
     // _BitScanForward64 returns 0 if x is zero, so handle this case:
@@ -96,9 +95,25 @@ int kingDistance2(uint64_t king1, uint64_t king2) {
     return std::max(std::abs(x1 - x2), std::abs(y1 - y2));
 }
 
+// Incentives for pieces moving towards the enemy king
+auto addIncentiveForPiece = [&](uint64_t pieces, uint64_t enemyKing, const int incentiveArray[]) {
+    double_t incentive = 0;
+    while (pieces) {
+        uint64_t piece = pieces & (~pieces + 1);
+        int distance = kingDistance2(piece, enemyKing);
+        incentive += incentiveArray[distance];
+        pieces &= ~piece;  // Clear the least significant bit set
+    }
+    return incentive;
+};
+
 double_t evaluate2(Board& board);
 
 double_t evaluate2(Board& board) {
+    // Check for draw condition based on insufficient material
+    if ((std::_Popcount(board.whitePieces) == 1) && (std::_Popcount(board.blackPieces) == 1)) {
+        return 0; // Return 0 to indicate a draw
+    }
     double_t result = 0;
 
     const double_t pawnValue = 100;
@@ -109,13 +124,28 @@ double_t evaluate2(Board& board) {
 
     int numWhitePawns = std::_Popcount(board.whitePawns);
     int numWhiteBishops = std::_Popcount(board.whiteBishops);
+    int numWhiteKnights = std::_Popcount(board.whiteKnights);
     int numWhiteRooks = std::_Popcount(board.whiteRooks);
     int numWhiteQueens = std::_Popcount(board.whiteQueens);
 
     int numBlackPawns = std::_Popcount(board.blackPawns);
     int numBlackBishops = std::_Popcount(board.blackBishops);
+    int numBlackKnights = std::_Popcount(board.blackKnights);
     int numBlackRooks = std::_Popcount(board.blackRooks);
     int numBlackQueens = std::_Popcount(board.blackQueens);
+
+    // Encourage draws if both sides have no pawns or major pieces left and only up to one minor piece each.
+    if (!numWhitePawns && !numBlackPawns &&
+        !numWhiteQueens && !numBlackQueens &&
+        !numWhiteRooks && !numBlackRooks &&
+        (numWhiteBishops + numWhiteKnights <= 1) &&
+        (numBlackBishops + numBlackKnights <= 1)) {
+
+        // If both sides have at most one minor piece each, this is a draw
+        if (numWhiteBishops + numWhiteKnights + numBlackBishops + numBlackKnights <= 2) {
+            return board.whiteToMove ? -5 : 5;
+        }
+    }
 
     // Define file masks
     Bitboard fileMasks[8] = {
@@ -127,7 +157,7 @@ double_t evaluate2(Board& board) {
     int pawnProgressBonus[8] = { 0, 10, 20, 30, 50, 70, 90, 0 }; // No bonus on rank 1 and rank 8
 
     // Define passed pawn bonus
-    int passedPawnBonus[8] = { 0, 20, 40, 60, 80, 100, 120, 0 }; // No bonus on rank 1 and rank 8
+    int passedPawnBonus[8] = { 0, 10, 20, 30, 50, 70, 90, 0 }; // No bonus on rank 1 and rank 8
 
     // Rank masks
     Bitboard rankMasks[8] = {
@@ -138,13 +168,13 @@ double_t evaluate2(Board& board) {
     // Calculate the game phase (0-1)
     const double_t totalMaterial = 16 * pawnValue + 4 * knightValue + 4 * bishopValue + 4 * rookValue + 2 * queenValue;
     double_t whiteMaterial = numWhitePawns * pawnValue +
-        std::_Popcount(board.whiteKnights) * knightValue +
+        numWhiteKnights * knightValue +
         numWhiteBishops * bishopValue +
         numWhiteRooks * rookValue +
         numWhiteQueens * queenValue;
 
     double_t blackMaterial = numBlackPawns * pawnValue +
-        std::_Popcount(board.blackKnights) * knightValue +
+        numBlackKnights * knightValue +
         numBlackBishops * bishopValue +
         numBlackRooks * rookValue +
         numBlackQueens * queenValue;
@@ -190,6 +220,9 @@ double_t evaluate2(Board& board) {
         result -= multiplierBishop;
     }
 
+
+    int whitePawnDefenders = 0;
+    int blackPawnDefenders = 0;
     // no pawns is bad
     if (gamePhase > 0.6) {
         if ((numWhitePawns < 1) && (numWhiteQueens == 0)) {
@@ -221,14 +254,16 @@ double_t evaluate2(Board& board) {
 
             // Count the number of pawns directly shielding the king
             int pawnDefenders = std::_Popcount(shieldPawns);
-            return kingSafetyBonus[pawnDefenders];
-            };
+            return pawnDefenders;
+        };
 
         // Calculate white king safety
-        result += calculateKingSafety(board.whiteKing, board.whitePawns, true);
+        whitePawnDefenders = calculateKingSafety(board.whiteKing, board.whitePawns, true);
+        result += kingSafetyBonus[whitePawnDefenders];
 
         // Calculate black king safety
-        result -= calculateKingSafety(board.blackKing, board.blackPawns, false);
+        blackPawnDefenders = calculateKingSafety(board.blackKing, board.blackPawns, false);
+        result -= kingSafetyBonus[blackPawnDefenders];
 
         // Get the file of the enemy king
         int whiteKingFile = ctzll3(board.whiteKing) % 8;
@@ -261,6 +296,21 @@ double_t evaluate2(Board& board) {
             result -= pawnStormBonus[rank] * std::_Popcount(blackRankPawns);
         }
 
+        // estimate how safe king is by how many queen moves
+        int whiteKingProxyMoves = size(board.generateQueenMoves(board.whiteKing, board.whitePieces, board.blackPieces));
+        if (whiteKingProxyMoves <= 1) {
+            result -= (2 - whiteKingProxyMoves) * 16;
+        }
+        else if (whiteKingProxyMoves > 3) {
+            result -= whiteKingProxyMoves * 6;
+        }
+        int blackKingProxyMoves = size(board.generateQueenMoves(board.blackKing, board.blackPieces, board.whitePieces));
+        if (blackKingProxyMoves <= 1) {
+            result += (2 - blackKingProxyMoves) * 16;
+        }
+        else if (blackKingProxyMoves > 3) {
+            result += blackKingProxyMoves * 6;
+        }
     }
 
     // Calculate white pieces' value and positional value
@@ -344,28 +394,60 @@ double_t evaluate2(Board& board) {
     result += 6 * board.generateRookMoves(board.whiteRooks, board.whitePieces, board.blackPieces).size();
     result -= 6 * board.generateRookMoves(board.blackRooks, board.blackPieces, board.whitePieces).size();
 
-    result += 6 * board.generateQueenMoves(board.whiteQueens, board.whitePieces, board.blackPieces).size();
-    result -= 6 * board.generateQueenMoves(board.blackQueens, board.blackPieces, board.whitePieces).size();
+    result += 4 * board.generateQueenMoves(board.whiteQueens, board.whitePieces, board.blackPieces).size();
+    result -= 4 * board.generateQueenMoves(board.blackQueens, board.blackPieces, board.whitePieces).size();
 
- 
-    // pawn shield
+   
+    
+    // Define incentive arrays for each piece type (example values)
+    int pawnIncentive[9] = { 0, 14, 12, 10, 8, 6, 4, 2, 0 };
+    int knightIncentive[9] = { 0, 5, 25, 15, 5, 0, 0, 0, 0 };
+    int bishopIncentive[9] = { 0, 21, 18, 15, 12, 9, 6, 3, 0 };
+    int rookIncentive[9] = { 0, 28, 24, 20, 16, 12, 8, 4, 0 };
+    int queenIncentive[9] = { 0, 35, 30, 25, 20, 15, 10, 5, 0 };
+    int defendersMultiplier[6] = { 2, 1.5, 1, 1, 0.5, 0 };
+    
+    if (gamePhase <= 0.6) {
+        //consider how many defenders early game
+        //result += addIncentiveForPiece(board.whitePawns, board.blackKing, pawnIncentive);
+        //result += addIncentiveForPiece(board.whiteKnights, board.blackKing, knightIncentive) * defendersMultiplier[blackPawnDefenders];
+        //result += addIncentiveForPiece(board.whiteBishops, board.blackKing, bishopIncentive) * defendersMultiplier[blackPawnDefenders];
+        //result += addIncentiveForPiece(board.whiteRooks, board.blackKing, rookIncentive) * defendersMultiplier[blackPawnDefenders];
+        //result += addIncentiveForPiece(board.whiteQueens, board.blackKing, queenIncentive) * defendersMultiplier[blackPawnDefenders];
 
-    // pawn storm
+        //result -= addIncentiveForPiece(board.blackPawns, board.whiteKing, pawnIncentive);
+        //result -= addIncentiveForPiece(board.blackKnights, board.whiteKing, knightIncentive) * defendersMultiplier[whitePawnDefenders];
+        //result -= addIncentiveForPiece(board.blackBishops, board.whiteKing, bishopIncentive) * defendersMultiplier[whitePawnDefenders];
+        //result -= addIncentiveForPiece(board.blackRooks, board.whiteKing, rookIncentive) * defendersMultiplier[whitePawnDefenders];
+        //result -= addIncentiveForPiece(board.blackQueens, board.whiteKing, queenIncentive) * defendersMultiplier[whitePawnDefenders];
+    }
+    
+    else {
+        //result += addIncentiveForPiece(board.whitePawns, board.blackKing, pawnIncentive);
+        //result += addIncentiveForPiece(board.whiteKnights, board.blackKing, knightIncentive);
+        //result += addIncentiveForPiece(board.whiteBishops, board.blackKing, bishopIncentive);
+        //result += addIncentiveForPiece(board.whiteRooks, board.blackKing, rookIncentive);
+        //result += addIncentiveForPiece(board.whiteQueens, board.blackKing, queenIncentive);
 
-    // threatining pieces
-
-
+        //result -= addIncentiveForPiece(board.blackPawns, board.whiteKing, pawnIncentive);
+        //result -= addIncentiveForPiece(board.blackKnights, board.whiteKing, knightIncentive);
+        //result -= addIncentiveForPiece(board.blackBishops, board.whiteKing, bishopIncentive);
+        //result -= addIncentiveForPiece(board.blackRooks, board.whiteKing, rookIncentive);
+        //result -= addIncentiveForPiece(board.blackQueens, board.whiteKing, queenIncentive);
+    }
+    
 
     // Lead is expanded as game goes on, incentives trading
     if ((gamePhase > 0.6) && (std::abs(result) > 400)) {
         result = result * (1 + gamePhase / 2.5);
         
-        int distBetweenKings = 7 - kingDistance2(board.blackKing, board.whiteKing); // smaller is better
+        int distBetweenKingsBonus[9] = { 0, 0, 140, 80, 40, 20, 0, -10, -20 };
+        int distBetweenKings = kingDistance2(board.blackKing, board.whiteKing); // smaller is better
         if (result > 0) {
-            result += 30 * distBetweenKings;
+            result += distBetweenKingsBonus[distBetweenKings];
         }
         else {
-            result -= 30 * distBetweenKings;
+            result -= distBetweenKingsBonus[distBetweenKings];
         }
     }
     return board.whiteToMove ? result : -result;
@@ -402,7 +484,6 @@ double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta) {
 
     double_t stand_pat = evaluate2(board);
     if (stand_pat >= beta) {
-        board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, Move(), 0, stand_pat);
         return beta;
     }
     if (alpha < stand_pat) {
@@ -430,16 +511,13 @@ double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta) {
 
     for (Move& move : moves) {
         board.makeMove(move);
-        board.updatePositionHistory(true);
-
-        if (!board.isThreefoldRepetition(false)) {
+        if (!board.isThreefoldRepetition()) {
             subBestScore = -quiescenceSearch2(board, -beta, -alpha);
         }
         else {
             subBestScore = 0;
         }
 
-        board.updatePositionHistory(false);
         board.enPassantTarget = store;
         board.whiteKingMoved = whiteKingMovedStore;
         board.whiteLRookMoved = whiteLRookMovedStore;
@@ -450,101 +528,86 @@ double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta) {
         board.undoMove(move);
 
         if (subBestScore >= beta) {
-            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, 0, stand_pat);
             return beta;
         }
         if (subBestScore > alpha) {
             alpha = subBestScore;
         }
+        if (alpha >= beta) {
+            break;
+        }
     }
-
-    board.record_tt_entry(hash, alpha, HASH_FLAG_UPPER, Move(), 0, stand_pat);
     return alpha;
 }
 
-std::tuple<Move, double_t> perft2(Board& board, int depth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves){
+std::tuple<Move, double_t> perft2(Board& board, int depth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, double_t alpha, double_t beta){
     double bestScore;
     Move bestMove;
-    std::tie(bestMove, bestScore) = perftHelper2(board, depth, -100000, 100000, depth, iterativeDeepeningMoves, 0, false);
+    std::tie(bestMove, bestScore) = perftHelper2(board, depth, alpha, beta, depth, iterativeDeepeningMoves, 0, false);
     return { bestMove, bestScore };
 }
 
 std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha, double_t beta, int startDepth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, int totalExtensions, bool lastIterationNull) {
-    const int MAX_EXTENSIONS = 4;
+    if (std::chrono::high_resolution_clock::now() > endTime2) {
+        return { Move(), -1.2345 };
+    }
+    const int MAX_EXTENSIONS = 3;
     const int MAX_EXTENSION_DEPTH = 3;
+    const double_t INITIAL_WINDOW = 50.0; // Initial aspiration window value
     int extension = 0;
     
     uint64_t hash = board.generateZobristHash();
     TT_Entry* ttEntry = board.probeTranspositionTable(hash);
 
-    if (ttEntry->key == hash && ttEntry->depth >= depth) {
-        if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return { ttEntry->move, ttEntry->score };
-        if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER && ttEntry->score >= beta) return { ttEntry->move, ttEntry->score };
-        if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER && ttEntry->score <= alpha) return { ttEntry->move, ttEntry->score };
+    if (ttEntry->key == hash) {
+        if (depth == startDepth && ttEntry->flag == TTFlag::HASH_BOOK) {
+            return { ttEntry->move, 0 };
+        }
+        else if (ttEntry->depth >= depth) {
+            if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return { ttEntry->move, ttEntry->score };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER && ttEntry->score >= beta) return { ttEntry->move, ttEntry->score };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER && ttEntry->score <= alpha) return { ttEntry->move, ttEntry->score };
+        }
     }
 
     std::vector<Move> moves;
     if (depth == startDepth && !iterativeDeepeningMoves.empty()) {
-        // Extract moves from the tuples for use in this depth
         std::transform(iterativeDeepeningMoves.begin(), iterativeDeepeningMoves.end(), std::back_inserter(moves),
             [](const std::tuple<Move, double_t>& pair) { return std::get<0>(pair); });
-    }
-    else {
+    } else {
         moves = board.generateAllMoves();
         if (moves.empty()) {
             if (board.amIInCheck(board.whiteToMove)) {
                 return { Move(), -20000 }; // checkmate
-            }
-            else {
+            } else {
                 return { Move(), 0 }; // stalemate
             }
-        }
-        else if (depth == 0) {
+        } else if (depth == 0) {
             double_t val = quiescenceSearch2(board, alpha, beta);
             return { Move(), val };
         }
         moves = orderMoves(board, moves, ttEntry, depth);
     }
-    
+  
     // Null Move Pruning
-    /**
-    if (!board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull) {
-        Bitboard store = board.enPassantTarget;
-        bool whiteKingMovedStore = board.whiteKingMoved;
-        bool whiteLRookMovedStore = board.whiteLRookMoved;
-        bool whiteRRookMovedStore = board.whiteRRookMoved;
-        bool blackKingMovedStore = board.blackKingMoved;
-        bool blackLRookMovedStore = board.blackLRookMoved;
-        bool blackRRookMovedStore = board.blackRRookMoved;
-        Move nullMove = Move();
-        board.makeMove(nullMove);
+    if (!board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull && depth != startDepth) {
+        board.makeNullMove();
         int R = 2;
         std::tuple<Move, double_t> result = perftHelper2(board, depth - 1 - R, -beta, -beta + 1, startDepth, iterativeDeepeningMoves, totalExtensions, true);
         double_t nullMoveEvaluation = -std::get<1>(result);
+        board.undoNullMove();
 
-        board.enPassantTarget = store;
-        board.whiteKingMoved = whiteKingMovedStore;
-        board.whiteLRookMoved = whiteLRookMovedStore;
-        board.whiteRRookMoved = whiteRRookMovedStore;
-        board.blackKingMoved = blackKingMovedStore;
-        board.blackLRookMoved = blackLRookMovedStore;
-        board.undoMove(nullMove);
-
-
-        // null move cutoff
         if (nullMoveEvaluation >= beta) {
             return { Move(), beta }; // Cutoff
         }
 
-        // mate threat extension
+        // mate threat or something?
         if (totalExtensions < MAX_EXTENSIONS) {
             if (nullMoveEvaluation + 100 <= alpha) {
                 extension = 1;
             }
         }
     }
-    */
-
 
     Move bestMove;
     double_t bestScore = -100000;
@@ -559,18 +622,16 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
     Move subBestMove;
     std::vector<std::tuple<Move, double_t>> moveScores;
 
-    for (int i = 0; i <size(moves); i++) {
+    for (int i = 0; i < moves.size(); i++) {
         Move& move = moves[i];
         board.makeMove(move);
-        board.updatePositionHistory(true);
 
-        if (!board.isThreefoldRepetition(false)) {
+        if (!board.isThreefoldRepetition()) {
             bool needsFullSearch = true;
-            // Lets do a reduced depth search for the less promising moves
             if (i >= 3 && extension == 0 && depth >= 4 && !move.isCapture) {
                 int depthReduction;
 
-                if (i >= (size(moves) * 4 / 5)) {
+                if (i >= (moves.size() * 4 / 5)) {
                     depthReduction = 2;
                 }
                 else {
@@ -590,7 +651,7 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
         else {
             subBestScore = 0;
         }
-        board.updatePositionHistory(false);
+
         board.enPassantTarget = store;
         board.whiteKingMoved = whiteKingMovedStore;
         board.whiteLRookMoved = whiteLRookMovedStore;
@@ -599,12 +660,22 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
         board.blackLRookMoved = blackLRookMovedStore;
         board.blackRRookMoved = blackRRookMovedStore;
         board.undoMove(move);
+
+        if (subBestScore == 1.2345) {
+            return { Move(), -1.2345 };
+        }
+
         if (depth == startDepth) {
             moveScores.emplace_back(move, subBestScore);
         }
 
         if (subBestScore >= beta) {
-            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, depth, evaluate2(board));
+            // Record the killer move if it isnt a capture
+            if (board.killerMoves[0][depth] != move && !move.isCapture && board.killerMoves[1][depth] != move) {
+                board.killerMoves[1][depth] = board.killerMoves[0][depth];
+                board.killerMoves[0][depth] = move;
+            }
+            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, depth);
             return { move, beta };
         }
 
@@ -623,15 +694,14 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
     }
 
     if (depth == startDepth) {
-        // Sort moves based on scores for next iterative deepening step
         std::sort(moveScores.begin(), moveScores.end(), [](const std::tuple<Move, double_t>& a, const std::tuple<Move, double_t>& b) {
             return std::get<1>(a) > std::get<1>(b); // Sort descending by score
             });
-        iterativeDeepeningMoves = moveScores; // Update iterativeDeepeningMoves for next iteration
+        iterativeDeepeningMoves = moveScores;
     }
 
-    TTFlag flag = (bestScore <= alpha) ? HASH_FLAG_UPPER : (bestScore >= beta) ? HASH_FLAG_LOWER : HASH_FLAG_EXACT;
-    board.record_tt_entry(hash, bestScore, flag, bestMove, depth, evaluate2(board));
+    TTFlag flag = (bestScore <= alpha) ? HASH_FLAG_UPPER : HASH_FLAG_EXACT;
+    board.record_tt_entry(hash, bestScore, flag, bestMove, depth);
 
     return { bestMove, bestScore };
 }

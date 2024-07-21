@@ -35,11 +35,55 @@ unsigned int ctzll(unsigned long long x) {
         return 64; // Define behavior for x == 0
 }
 
+/**
+// Function to serialize a Move object
+std::ostream& operator<<(std::ostream& os, const Move& move) {
+    os.write(reinterpret_cast<const char*>(&move.from), sizeof(move.from));
+    os.write(reinterpret_cast<const char*>(&move.to), sizeof(move.to));
+    os.write(reinterpret_cast<const char*>(&move.promotion), sizeof(move.promotion));
+    os.write(reinterpret_cast<const char*>(&move.isCapture), sizeof(move.isCapture));
+    os.write(reinterpret_cast<const char*>(&move.capturedPiece), sizeof(move.capturedPiece));
+    return os;
+}
+
+// Function to deserialize a Move object
+std::istream& operator>>(std::istream& is, Move& move) {
+    is.read(reinterpret_cast<char*>(&move.from), sizeof(move.from));
+    is.read(reinterpret_cast<char*>(&move.to), sizeof(move.to));
+    is.read(reinterpret_cast<char*>(&move.promotion), sizeof(move.promotion));
+    is.read(reinterpret_cast<char*>(&move.isCapture), sizeof(move.isCapture));
+    is.read(reinterpret_cast<char*>(&move.capturedPiece), sizeof(move.capturedPiece));
+    return is;
+}
+
+// Function to serialize a TT_Entry object
+std::ostream& operator<<(std::ostream& os, const TT_Entry& entry) {
+    os.write(reinterpret_cast<const char*>(&entry.key), sizeof(entry.key));
+    os.write(reinterpret_cast<const char*>(&entry.score), sizeof(entry.score));
+    os.write(reinterpret_cast<const char*>(&entry.depth), sizeof(entry.depth));
+    os.write(reinterpret_cast<const char*>(&entry.flag), sizeof(entry.flag));
+    os << entry.move;
+    return os;
+}
+
+// Function to deserialize a TT_Entry object
+std::istream& operator>>(std::istream& is, TT_Entry& entry) {
+    is.read(reinterpret_cast<char*>(&entry.key), sizeof(entry.key));
+    is.read(reinterpret_cast<char*>(&entry.score), sizeof(entry.score));
+    is.read(reinterpret_cast<char*>(&entry.depth), sizeof(entry.depth));
+    is.read(reinterpret_cast<char*>(&entry.flag), sizeof(entry.flag));
+    is >> entry.move;
+    return is;
+}
+*/
 // Constructor to initialize the board
 Board::Board() {
     createBoard();
+    initializeZobristTable();
     resize_tt(64);  // Calls the resize function to allocate memory
     clear_tt();     // Clear the table to reset all entries
+    loadOpeningBook();
+    //std::cout << "Number of entries in the transposition table: " << countTranspositionTableEntries() << std::endl;
 }
 
 // Function to initialize the board with the starting positions
@@ -76,30 +120,79 @@ void Board::createBoardFromFEN(const std::string& fen) {
 
 void Board::printBoard() {
     auto getPieceChar = [this](int index) -> char {
-        if ((whitePawns >> index) & 1) return 'p';
-        if ((blackPawns >> index) & 1) return 'P';
-        if ((whiteRooks >> index) & 1) return 'r';
-        if ((blackRooks >> index) & 1) return 'R';
-        if ((whiteKnights >> index) & 1) return 'n';
-        if ((blackKnights >> index) & 1) return 'N';
-        if ((whiteBishops >> index) & 1) return 'b';
-        if ((blackBishops >> index) & 1) return 'B';
-        if ((whiteQueens >> index) & 1) return 'q';
-        if ((blackQueens >> index) & 1) return 'Q';
-        if ((whiteKing >> index) & 1) return 'k';
-        if ((blackKing >> index) & 1) return 'K';
+        if ((whitePawns >> index) & 1) return 'P';
+        if ((blackPawns >> index) & 1) return 'p';
+        if ((whiteRooks >> index) & 1) return 'R';
+        if ((blackRooks >> index) & 1) return 'r';
+        if ((whiteKnights >> index) & 1) return 'N';
+        if ((blackKnights >> index) & 1) return 'n';
+        if ((whiteBishops >> index) & 1) return 'B';
+        if ((blackBishops >> index) & 1) return 'b';
+        if ((whiteQueens >> index) & 1) return 'Q';
+        if ((blackQueens >> index) & 1) return 'q';
+        if ((whiteKing >> index) & 1) return 'K';
+        if ((blackKing >> index) & 1) return 'k';
         return '.';
         };
 
+    std::stringstream fenStream;
+    int emptyCount = 0;
+
+    // Generate FEN for the board pieces and print the board
     for (int rank = 7; rank >= 0; --rank) {
-        for (int file = 7; file >= 0; --file) {
+        for (int file = 7; file >= 0; --file) { // Flip the x-axis by iterating from right to left
             int index = rank * 8 + file;
-            std::cout << getPieceChar(index) << " ";
+            char piece = getPieceChar(index);
+            if (piece == '.') {
+                emptyCount++;
+            }
+            else {
+                if (emptyCount != 0) {
+                    fenStream << emptyCount;
+                    emptyCount = 0;
+                }
+                fenStream << piece;
+            }
+            std::cout << piece << " "; // Print the piece on the console
         }
-        std::cout << "\n";
+        if (emptyCount != 0) {
+            fenStream << emptyCount;
+            emptyCount = 0;
+        }
+        if (rank > 0) fenStream << '/';
+        std::cout << "\n"; // New line after each rank
     }
     std::cout << std::endl;
+
+    // Determine castling rights
+    std::string castlingRights;
+    if (!whiteKingMoved) {
+        if (!whiteRRookMoved) castlingRights += 'K';
+        if (!whiteLRookMoved) castlingRights += 'Q';
+    }
+    if (!blackKingMoved) {
+        if (!blackRRookMoved) castlingRights += 'k';
+        if (!blackLRookMoved) castlingRights += 'q';
+    }
+    if (castlingRights.empty()) castlingRights = "-";
+
+    // En Passant target
+    int epIndex = ctzll(enPassantTarget); // using GCC built-in function to find the index of the lowest set bit
+    std::string enPassant = "-";
+    if (enPassantTarget != 0 && epIndex >= 16 && epIndex <= 55) { // Valid en passant ranks
+        enPassant = numToBoardPosition(epIndex);
+    }
+
+    // Determine who's move it is
+    char playerToMove = whiteToMove ? 'w' : 'b';
+
+    // Complete FEN string with game state
+    fenStream << ' ' << playerToMove << ' ' << castlingRights << ' ' << enPassant << " 0 1";
+
+    // Output FEN string
+    std::cout << "FEN: " << fenStream.str() << std::endl;
 }
+
 
 std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
@@ -849,6 +942,35 @@ void Board::undoMove(const Move& move) {
     whiteToMove = !whiteToMove; // Toggle the side to move
 }
 
+void Board::makeNullMove() {
+    // Toggle the side to move
+    whiteToMove = !whiteToMove;
+
+    // Store board data
+    whiteKingMovedPrev = whiteKingMoved;
+    whiteLRookMovedPrev = whiteLRookMoved;
+    whiteRRookMovedPrev = whiteRRookMoved;
+    blackKingMovedPrev = blackKingMoved;
+    blackLRookMovedPrev = blackLRookMoved;
+    blackRRookMovedPrev = blackRRookMoved;
+    enPassantPrev = enPassantTarget;
+    enPassantTarget = 0x0;
+}
+
+void Board::undoNullMove() {
+    // Toggle the side to move back
+    whiteToMove = !whiteToMove;
+
+    // Restore previous board data
+    enPassantTarget = enPassantPrev;
+    whiteKingMoved = whiteKingMovedPrev;
+    whiteLRookMoved = whiteLRookMovedPrev;
+    whiteRRookMoved = whiteRRookMovedPrev;
+    blackKingMoved = blackKingMovedPrev;
+    blackLRookMoved = blackLRookMovedPrev;
+    blackRRookMoved = blackRRookMovedPrev;
+}
+
 void setBit(Bitboard& bitboard, int square) {
     bitboard |= 1ULL << square;
 }
@@ -1026,15 +1148,14 @@ void Board::updatePositionHistory(bool plus) {
     }
 }
 
-bool Board::isThreefoldRepetition(bool print) {
+bool Board::isThreefoldRepetition() {
     uint64_t hash = generateZobristHash();
-    if (print){
-            std::cout << positionHistory[hash] << std::endl;
-
-    }
     return positionHistory[hash] >= 3;
 }
 
+bool Board::isThreefoldRepetition(uint64_t hash) {
+    return positionHistory[hash] >= 3;
+}
 
 int getPieceValue(char piece) {
     switch (piece) {
@@ -1081,15 +1202,20 @@ bool isEqualCapture(const Move& move, const Board& board) {
     return defenderValue == attackerValue;
 }
 
+bool isKillerMove(const Move& move, const Board& board, int depth) {
+    return (move == board.killerMoves[0][depth] || move == board.killerMoves[1][depth]);
+ }
+
 std::vector<Move> orderMoves(Board & board, const std::vector<Move>&moves, TT_Entry * ttEntry, int depth) {
-    Move hashMove = (ttEntry && ttEntry->depth >= depth) ? ttEntry->move : NO_MOVE;
-    Move shallowHashMove = (ttEntry && ttEntry->depth >= (depth - 2)) ? ttEntry->move : NO_MOVE;
+    Move hashMove = (ttEntry && ttEntry->depth >= depth && ttEntry->flag == HASH_FLAG_EXACT) ? ttEntry->move : NO_MOVE;
+    Move shallowHashMove = (ttEntry && ttEntry->depth >= (depth - 2) && ttEntry->flag == HASH_FLAG_EXACT) ? ttEntry->move : NO_MOVE;
     std::vector<Move> orderedMoves;
     std::vector<Move> hashMoves;
     std::vector<Move> capturesAndPromotions;
     std::vector<Move> promotions;
     std::vector<Move> goodCaptures;
     std::vector<Move> equalCaptures;
+    std::vector<Move> killerMoves;
     std::vector<Move> nonCaptures;
     std::vector<Move> losingCaptures;
 
@@ -1113,6 +1239,9 @@ std::vector<Move> orderMoves(Board & board, const std::vector<Move>&moves, TT_En
         else if (isEqualCapture(move, board)) {
             equalCaptures.push_back(move);
         }
+        else if (isKillerMove(move, board, depth)) {
+            killerMoves.push_back(move);
+        }
         else if (!move.isCapture) {
             nonCaptures.push_back(move);
         }
@@ -1127,6 +1256,7 @@ std::vector<Move> orderMoves(Board & board, const std::vector<Move>&moves, TT_En
     orderedMoves.insert(orderedMoves.end(), promotions.begin(), promotions.end());
     orderedMoves.insert(orderedMoves.end(), goodCaptures.begin(), goodCaptures.end());
     orderedMoves.insert(orderedMoves.end(), equalCaptures.begin(), equalCaptures.end());
+    orderedMoves.insert(orderedMoves.end(), killerMoves.begin(), killerMoves.end());
     orderedMoves.insert(orderedMoves.end(), nonCaptures.begin(), nonCaptures.end());
     orderedMoves.insert(orderedMoves.end(), losingCaptures.begin(), losingCaptures.end());
 
@@ -1142,7 +1272,6 @@ bool isTacticalPosition(std::vector<Move> moves, Board board) {
     return false;
 }
 
-
 void Board::resize_tt(uint64_t mb) {
     size_t entries = (mb * 1048576ull) / sizeof(TT_Entry);
     size_t new_entries = 1ull << (int)std::log2(entries);  // Ensures power of 2 size for efficient indexing
@@ -1155,7 +1284,7 @@ void Board::configureTranspositionTableSize(uint64_t sizeInMB) {
     resize_tt(sizeInMB);
 }
 
-void Board::record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move, int depth, int evaluation) {
+void Board::record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move, int depth) {
     TT_Entry& tt_entry = transposition_table[hash_key & (transposition_table.size() - 1)];
 
     // Use deeper or exact information to replace existing entry
@@ -1165,7 +1294,6 @@ void Board::record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move
         tt_entry.flag = flag;
         tt_entry.move = move;
         tt_entry.depth = depth;
-        tt_entry.evaluation = evaluation;
     }
 }
 
@@ -1198,7 +1326,7 @@ TT_Entry* Board::probeTranspositionTable(uint64_t hash) {
 
 bool isNullViable(Board& board) {
     if (board.whiteToMove) {
-        if ((std::_Popcount(board.whiteBishops) + std::_Popcount(board.whiteKnights) + std::_Popcount(board.whiteRooks) + (std::_Popcount(board.whiteQueens) * 2)) >= 2) {
+        if ((std::_Popcount(board.whiteBishops) + std::_Popcount(board.whiteKnights) + (std::_Popcount(board.whiteRooks) * 2) + (std::_Popcount(board.whiteQueens) * 2)) >= 2) {
             return true;
         }
         else {
@@ -1206,7 +1334,7 @@ bool isNullViable(Board& board) {
         }
     }
     else {
-        if ((std::_Popcount(board.blackBishops) + std::_Popcount(board.blackKnights) + std::_Popcount(board.blackRooks) + (std::_Popcount(board.blackQueens) * 2)) >= 2) {
+        if ((std::_Popcount(board.blackBishops) + std::_Popcount(board.blackKnights) + (std::_Popcount(board.blackRooks) * 2) + (std::_Popcount(board.blackQueens) * 2)) >= 2) {
             return true;
         }
         else {
@@ -1215,3 +1343,209 @@ bool isNullViable(Board& board) {
     }
 }
 
+// Function to deserialize a Move object
+std::istream& operator>>(std::istream& is, Move& move) {
+    is.read(reinterpret_cast<char*>(&move.from), sizeof(move.from));
+    is.read(reinterpret_cast<char*>(&move.to), sizeof(move.to));
+    is.read(reinterpret_cast<char*>(&move.promotion), sizeof(move.promotion));
+    is.read(reinterpret_cast<char*>(&move.isCapture), sizeof(move.isCapture));
+    is.read(reinterpret_cast<char*>(&move.capturedPiece), sizeof(move.capturedPiece));
+    return is;
+}
+
+// Function to deserialize a TT_Entry object
+std::istream& operator>>(std::istream& is, TT_Entry& entry) {
+    is.read(reinterpret_cast<char*>(&entry.key), sizeof(entry.key));
+    is.read(reinterpret_cast<char*>(&entry.score), sizeof(entry.score));
+    is.read(reinterpret_cast<char*>(&entry.depth), sizeof(entry.depth));
+    is.read(reinterpret_cast<char*>(&entry.flag), sizeof(entry.flag));
+    is >> entry.move;
+    return is;
+}
+
+void Board::loadOpeningBook() {
+    std::string filename = "transposition_table.dat";
+    std::ifstream file2(filename, std::ios::binary);
+    if (!file2) {
+        std::cerr << "Failed to open file for reading: " << filename << std::endl;
+        return;
+    }
+    TT_Entry entry2;
+    while (file2 >> entry2) {
+        if (entry2.key != 0 && entry2.move.from != -1 && entry2.move.to != -1) {
+            record_tt_entry(entry2.key, 0, HASH_BOOK, entry2.move, 0);
+        }
+    }
+}
+
+// Function to convert a board position (e.g. "e2") to an index
+int boardPositionToIndex(const std::string& pos) {
+    if (pos.size() != 2) return -1; // Invalid position
+    char fileChar = pos[0];
+    char rankChar = pos[1];
+
+    int file = 'h' - fileChar;
+    int rank = rankChar - '1';
+
+    if (file < 0 || file > 7 || rank < 0 || rank > 7) return -1; // Invalid position
+    return rank * 8 + file;
+}
+
+// Function to convert move string (e.g., "e2e4") to a Move object
+Move convertToMoveObject(const std::string& moveStr) {
+    if (moveStr.size() != 4) return Move(-1, -1); // Invalid move string
+    std::string fromStr = moveStr.substr(0, 2);
+    std::string toStr = moveStr.substr(2, 2);
+
+    int from = boardPositionToIndex(fromStr);
+    int to = boardPositionToIndex(toStr);
+
+    return Move(from, to);
+}
+
+size_t Board::countTranspositionTableEntries() const {
+    size_t count = 0;
+    for (const auto& entry : transposition_table) {
+        if (entry.key != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+/**
+Move parseMove(const std::string& moveStr, Board board) {
+    // King side castle
+    if (moveStr == "'O-O'") {
+        if (board.whiteToMove) {
+            Move move(3, 1);
+            return move;
+        }
+        else {
+            Move move(59, 57);
+            return move;
+        }
+    }
+    else if (moveStr == "'O-O-O'") {
+        if (board.whiteToMove) {
+            Move move(3, 5);
+            return move;
+        }
+        else {
+            Move move(59, 61);
+            return move;
+        }
+    }
+    bool isCapture = moveStr.find('x') != std::string::npos;
+    char promotion = 0;
+    int startIndex = 1;
+    int expectedLength = 4;
+    if (isCapture) {
+        expectedLength += 1;
+        startIndex++;
+    }
+    if (moveStr.find('=') != std::string::npos) {
+        promotion = moveStr.back();
+        expectedLength += 2;
+    }
+
+    // Simplified example, does not handle disambiguation or pawn moves accurately
+    std::string toPos;
+    char pieceMoving = 'P';
+
+    if (isupper(moveStr[1])) {
+        // For non-pawn moves
+        startIndex++;
+        expectedLength++;
+        pieceMoving = moveStr[1];
+    }
+
+    int file = 0;
+    int rank = 0;
+    // checking disambiguation
+    if (size(moveStr) > expectedLength) {
+        char disambig = isupper(moveStr[1]) ? moveStr[2] : moveStr[1];
+        if (isalpha(disambig)) {
+            file = 'h' - disambig;
+        }
+        else {
+            rank = disambig - '1';
+        }
+        startIndex++;
+    }
+
+    toPos = moveStr.substr(startIndex, 2);
+    int toIndex = boardPositionToIndex(toPos);
+
+    std::vector<Move> moves;
+    Bitboard ownPieces = board.whiteToMove ? board.whitePieces : board.blackPieces;
+    Bitboard opponentPieces = board.whiteToMove ? board.blackPieces : board.whitePieces;
+    if (pieceMoving == 'P') {
+        moves = board.generatePawnMoves(board.whiteToMove ? board.whitePawns : board.blackPawns, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'N') {
+        moves = board.generateKnightMoves(board.whiteToMove ? board.whiteKnights : board.blackKnights, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'B') {
+        moves = board.generateBishopMoves(board.whiteToMove ? board.whiteBishops : board.blackBishops, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'R') {
+        moves = board.generateRookMoves(board.whiteToMove ? board.whiteRooks : board.blackRooks, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'Q') {
+        moves = board.generateQueenMoves(board.whiteToMove ? board.whiteQueens : board.blackQueens, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'K') {
+        moves = board.generateKingMoves(board.whiteToMove ? board.whiteKing : board.blackKing, ownPieces, opponentPieces);
+    }
+
+    for (Move move : moves) {
+
+        if (move.to == toIndex) {
+            if (!file && !rank) {
+                return move;
+            }
+            else if (file && (move.from % 8 == file)) {
+                return move;
+            }
+            else if (rank && (move.from / 8 == rank)) {
+                return move;
+            }
+        }
+    }
+    return Move();
+}
+
+void convertMoves(const std::string& input, Board& board) {
+    std::vector<Move> moveList;
+    std::istringstream inputStream(input);
+    std::string line;
+    while (std::getline(inputStream, line)) {
+        if (line.find('{') != std::string::npos && line.find('}') != std::string::npos) {
+            std::cout << board.countTranspositionTableEntries() << std::endl;
+            board.createBoard();
+            std::vector<std::string> movesVec;
+            std::string movesStr = line.substr(line.find('{') + 1, line.find('}') - line.find('{') - 1);
+            std::istringstream movesStream(movesStr);
+            std::string move;
+            while (std::getline(movesStream, move, ',')) {
+                move.erase(remove_if(move.begin(), move.end(), isspace), move.end()); // Remove spaces
+                movesVec.push_back(move);
+            }
+
+            for (const auto& moveStr : movesVec) {
+                Move move = parseMove(moveStr, board);
+                if (move.from == -1) {
+                    board.printBoard();
+                    std::cout << move.from << move.to << std::endl;
+                    break;
+                }
+                board.makeMove(move);
+                uint64_t hash = board.generateZobristHash();
+                TT_Entry* ttEntry = board.probeTranspositionTable(hash);
+                board.record_tt_entry(hash, 0, HASH_BOOK, move, 0);
+            }
+        }
+    }
+}
+
+*/

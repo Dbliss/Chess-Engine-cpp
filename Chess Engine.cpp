@@ -11,6 +11,12 @@
 #include <random>
 #include "zobrist.h"
 #include <tuple>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include <cstdint>
 
 const char* fenArrayShort[] = {
     "r1bqk1r1/1p1p1n2/p1n2pN1/2p1b2Q/2P1Pp2/1PN5/PB4PP/R4RK1 w q - - bm Rxf4",
@@ -206,51 +212,161 @@ const char* fenArray[] = {
 "8/8/8/8/4kp2/1R6/P2q1PPK/8 w - - bm a3"
 };
 
+std::ostream& operator<<(std::ostream& os, const Move& move) {
+    os.write(reinterpret_cast<const char*>(&move.from), sizeof(move.from));
+    os.write(reinterpret_cast<const char*>(&move.to), sizeof(move.to));
+    os.write(reinterpret_cast<const char*>(&move.promotion), sizeof(move.promotion));
+    os.write(reinterpret_cast<const char*>(&move.isCapture), sizeof(move.isCapture));
+    os.write(reinterpret_cast<const char*>(&move.capturedPiece), sizeof(move.capturedPiece));
+    return os;
+}
+
+// Function to serialize a TT_Entry object
+std::ostream& operator<<(std::ostream& os, const TT_Entry& entry) {
+    os.write(reinterpret_cast<const char*>(&entry.key), sizeof(entry.key));
+    os.write(reinterpret_cast<const char*>(&entry.score), sizeof(entry.score));
+    os.write(reinterpret_cast<const char*>(&entry.depth), sizeof(entry.depth));
+    os.write(reinterpret_cast<const char*>(&entry.flag), sizeof(entry.flag));
+    os << entry.move;
+    return os;
+}
+
+void saveTranspositionTable(const std::string& filename, Board& board) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) {
+        std::cerr << "Failed to open file for writing: " << filename << std::endl;
+        return;
+    }
+    for (const auto& entry : board.transposition_table) {
+        file << entry;
+    }
+}
 
 // Stub for engine move generation
 Move getEngineMove1(Board& board, int timeLimit) {
-    auto currentTime = std::chrono::high_resolution_clock::now();
-    auto finishTime = currentTime + std::chrono::milliseconds(timeLimit);
-    double bestScore = 0;
+    endTime = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(timeLimit);
+    std::chrono::time_point<std::chrono::high_resolution_clock> startTime = std::chrono::high_resolution_clock::now();
+    double_t bestScore = 0;
     Move bestMove;
-    int depth = 1;
+    Move prevBestMove;
+    int depth = 0;
     std::vector<std::tuple<Move, double_t>> iterativeDeepeningMoves;
-    while (true) {
-        if (std::chrono::high_resolution_clock::now() > finishTime) {
+    while (depth < 100) {
+        depth++;
+        std::tie(bestMove, bestScore) = engine(board, depth, iterativeDeepeningMoves, -99999, 99999);
+
+        if (bestScore == -1.2345) { // Timeout
             break;
         }
-        depth = depth + 1;
-        std::tie(bestMove, bestScore) = engine(board, depth, iterativeDeepeningMoves);
-        if (std::abs(bestScore) > 10000) {
-            break;
+        else if (bestMove.to != -1 && bestMove.from != -1) { // This is our normal case
+            prevBestMove = bestMove;
+            if (std::abs(bestScore) > 10000) {
+                break;
+            }
         }
     }
-
-    //std::cout << "engine1 depth: " << depth << std::endl;
-    return bestMove;
+    if (prevBestMove.from == -1) { // Most likely due to depth 0 failing to do in timelimit
+        std::cout << "ERROR ENGINE1: " << depth << std::endl;
+        prevBestMove = getEngineMove1(board, timeLimit * 2);
+    }
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = currentTime - startTime;    
+    std::cout << "MOVE FOUND: engine1 depth: " << depth << " Took: " << elapsed.count() << std::endl;
+    return prevBestMove;
 }
 
 Move getEngineMove2(Board& board, int timeLimit) {
-    auto currentTime = std::chrono::high_resolution_clock::now();
-    auto finishTime = currentTime + std::chrono::milliseconds(timeLimit);
-    double bestScore = 0;
+    endTime2 = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(timeLimit);
+    std::chrono::time_point<std::chrono::high_resolution_clock> startTime = std::chrono::high_resolution_clock::now();
+    double_t bestScore = 0;
     Move bestMove;
-    int depth = 1;
+    Move prevBestMove;
+    double_t inf = 99999;
+    int depth = 0;
     std::vector<std::tuple<Move, double_t>> iterativeDeepeningMoves;
-    while (true) {
-        if (std::chrono::high_resolution_clock::now() > finishTime) {
+    while (depth < 100) {
+        depth++;
+        std::tie(bestMove, bestScore) = perft2(board, depth, iterativeDeepeningMoves, -inf, inf);
+
+        // Timeout
+        if (bestScore == -1.2345) {
             break;
         }
-        depth = depth + 1;
-        std::tie(bestMove, bestScore) = perft2(board, depth, iterativeDeepeningMoves);
-        if (std::abs(bestScore) > 10000) {
+        else if (bestMove.to != -1 && bestMove.from != -1) {
+            prevBestMove = bestMove;
+            if (std::abs(bestScore) > 10000) {
+                return prevBestMove;
+            }
+        }
+    }
+    if (prevBestMove.from == -1) {
+        std::cout << "ERROR ENGINE2: " << depth << std::endl;
+        return getEngineMove2(board, timeLimit * 2);
+    }
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = currentTime - startTime;
+    std::cout << "engine2 depth: " << depth << " Took: " << elapsed.count() << std::endl;    return prevBestMove;
+}
+
+// ASPIRATION WINDOWS NEEDS MORE TESTING
+/**
+Move getEngineMove2(Board& board, int timeLimit) {
+    endTime2 = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(timeLimit);
+    double_t bestScore = 0;
+    double_t prevBestScore = 0;
+    Move bestMove;
+    Move prevBestMove;
+    Move ultimateMove;
+    double_t inf = 99999;
+    int depth = 0;
+    std::vector<std::tuple<Move, double_t>> iterativeDeepeningMoves;
+    while (depth < 100) {
+        depth++;
+        double_t delta = 40000;
+        ultimateMove = prevBestMove;
+        if (std::abs(prevBestScore) > 10000) {
+            break;
+        }
+        double_t alpha = std::max(prevBestScore - delta, -inf);
+        double_t beta = std::min(prevBestScore + delta, inf);
+        while (true) {
+            std::tie(bestMove, bestScore) = perft2(board, depth, iterativeDeepeningMoves, alpha, beta);
+
+            // Timeout
+            if (bestScore == -1.2345) {
+                break;
+            }
+            else if (bestMove.to != -1 && bestMove.from != -1) {
+                prevBestMove = bestMove;
+                prevBestScore = bestScore;
+                if (bestScore <= alpha) {
+                    beta = (alpha + beta) / 2;
+                    alpha = std::max(bestScore - delta, -inf);
+                }
+                else if (bestScore >= beta) {
+                    beta = std::min(bestScore + delta, inf);
+                }
+                else {
+                    break;
+                }
+                delta += delta;
+            }
+            else {
+                std::cout << "MINOR ERROR ENGINE1" << std::endl;
+            }
+        }
+        if (bestScore == -1.2345) {
             break;
         }
     }
-
+    if (ultimateMove.from == -1) { 
+        std::cout << "MAJOR ERROR ENGINE1" << std::endl;
+        ultimateMove = getEngineMove2(board, timeLimit * 2);
+    }
     //std::cout << "engine2 depth: " << depth << std::endl;
-    return bestMove;
+    return ultimateMove;
 }
+*/
 
 bool isDrawByRepetition(const std::deque<std::pair<int, int>>& moves) {
     if (moves.size() < 6) return false;
@@ -287,27 +403,41 @@ void playEngines(int& engine1Wins, int& engine2Wins, int& draws, int timeLimit, 
                 }
                 else {
                     draws++;
+                    std::cout << "stalemate" << std::endl;
+
                 }
                 std::cout << "engine1 wins: " << engine1Wins << " engine2 wins: " << engine2Wins << " draws: " << draws << std::endl;
                 break;
             }
             else if (board.isThreefoldRepetition(false)) {
                 draws++;
+                std::cout << "3fold draw" << std::endl;
                 std::cout << "engine1 wins: " << engine1Wins << " engine2 wins: " << engine2Wins << " draws: " << draws << std::endl;
                 break;
             }
 
             Move engineMove = isEngine1Turn ? getEngineMove1(board, timeLimit) : getEngineMove2(board, timeLimit);
             board.makeMove(engineMove);
+            board.lastMove = engineMove;
             numMoves++;
             board.updatePositionHistory(true);
 
             if (displayOn) {
-                display.updatePieces(board);
+                display.updatePieces(window, board);
+            }
+            // Check for draw condition based on insufficient material
+            if ((std::_Popcount(board.whitePieces) == 1) && (std::_Popcount(board.blackPieces) == 1)) {
+                draws++;
+                std::cout << "insufficient material draw" << std::endl;
+
+                std::cout << "engine1 wins: " << engine1Wins << " engine2 wins: " << engine2Wins << " draws: " << draws << std::endl;
+                break;
             }
 
-            if (numMoves > moveLimit) {
+            else if (numMoves > moveLimit) {
                 draws++;
+                std::cout << "move limit draw" << std::endl;
+
                 std::cout << "engine1 wins: " << engine1Wins << " engine2 wins: " << engine2Wins << " draws: " << draws << std::endl;
                 break;
             }
@@ -358,9 +488,11 @@ void playEngines(int& engine1Wins, int& engine2Wins, int& draws, int timeLimit, 
 }
 
 void playAgainstComputer(char playerColor, int timeLimit) {
+    initializeZobristTable();
     Board board;
     board.createBoard();
-    initializeZobristTable();
+    //board.createBoardFromFEN("1k1r3r/2p2qpp/R5b1/2P5/1P1pP3/3Bb2P/6Q1/R6K w - - 0 1");
+
 
     BoardDisplay display;
     display.setupPieces(board);
@@ -383,12 +515,12 @@ void playAgainstComputer(char playerColor, int timeLimit) {
                     std::cout << "Engine wins!" << std::endl;
                 }
                 else {
-                    std::cout << "Draw!" << std::endl;
+                    std::cout << "Draw by stalemate!" << std::endl;
                 }
                 break;
             }
             else if (board.isThreefoldRepetition(false)) {
-                std::cout << "Draw!" << std::endl;
+                std::cout << "Draw by repitition!" << std::endl;
                 break;
             }
 
@@ -405,20 +537,22 @@ void playAgainstComputer(char playerColor, int timeLimit) {
                     std::cout << "Player wins!" << std::endl;
                 }
                 else {
-                    std::cout << "Draw!" << std::endl;
+                    std::cout << "Draw by stalemate!" << std::endl;
                 }
                 break;
             }
             else if (board.isThreefoldRepetition(false)) {
-                std::cout << "Draw!" << std::endl;
+                std::cout << "Draw by repitiion!" << std::endl;
                 break;
             }
 
             Move engineMove = getEngineMove2(board, timeLimit);
             board.makeMove(engineMove);
+            std::cout << engineMove.from << engineMove.to << std::endl;
+            board.lastMove = engineMove;
             board.updatePositionHistory(true);
             board.printBoard();
-            display.updatePieces(board);
+            display.updatePieces(window, board);
             std::cout << "Engine move made" << std::endl;
             isPlayerTurn = true;
         }
@@ -430,18 +564,219 @@ void playAgainstComputer(char playerColor, int timeLimit) {
 }
 
 int main() {
+    //Move move = convertToMoveObject("e2e4");
     int engine1Wins = 0;
     int engine2Wins = 0;
     int draws = 0;
-    int timeLimit = 150; //milliseconds
-    char playerColour = 'b';
+    int timeLimit = 400; //milliseconds
+    char playerColour = 'w';
     bool display = false;
-    int moveLimit = 100;
+    int moveLimit = 150;
     //playAgainstComputer(playerColour, timeLimit);
     playEngines(engine1Wins, engine2Wins, draws, timeLimit, display, moveLimit);
 
     std::cout << "Engine 1 wins: " << engine1Wins << std::endl;
     std::cout << "Engine 2 wins: " << engine2Wins << std::endl;
     std::cout << "Draws: " << draws << std::endl;
+    return 0;
+}
+
+
+Move parseMove(const std::string& moveStr, Board& board) {
+    // King side castle
+    if (moveStr == "'O-O'") {
+        if (board.whiteToMove) {
+            Move move(3, 1);
+            return move;
+        }
+        else {
+            Move move(59, 57);
+            return move;
+        }
+    }
+    else if (moveStr == "'O-O-O'") {
+        if (board.whiteToMove) {
+            Move move(3, 5);
+            return move;
+        }
+        else {
+            Move move(59, 61);
+            return move;
+        }
+    }
+    bool isCapture = moveStr.find('x') != std::string::npos;
+    char promotion = 0;
+    int startIndex = 1;
+    int expectedLength = 4;
+    if (isCapture) {
+        expectedLength += 1;
+        startIndex++;
+    }
+    if (moveStr.find('=') != std::string::npos) {
+        promotion = moveStr.back();
+        expectedLength += 2;
+    }
+
+    // Simplified example, does not handle disambiguation or pawn moves accurately
+    std::string toPos;
+    char pieceMoving = 'P';
+
+    if (isupper(moveStr[1])) {
+        // For non-pawn moves
+        startIndex++;
+        expectedLength++;
+        pieceMoving = moveStr[1];
+    }
+
+    int file = -1;
+    int rank = -1;
+    // checking disambiguation
+    if (size(moveStr) > expectedLength) {
+        char disambig = isupper(moveStr[1]) ? moveStr[2] : moveStr[1];
+        if (isalpha(disambig)) {
+            file = 'h' - disambig;
+        }
+        else {
+            rank = disambig - '1';
+        }
+        startIndex++;
+    }
+   
+    toPos = moveStr.substr(startIndex, 2);
+    int toIndex = boardPositionToIndex(toPos);
+
+    std::vector<Move> moves;
+    Bitboard ownPieces = board.whiteToMove ? board.whitePieces : board.blackPieces;
+    Bitboard opponentPieces = board.whiteToMove ? board.blackPieces : board.whitePieces;
+    if (pieceMoving == 'P') {
+        moves = board.generatePawnMoves(board.whiteToMove ? board.whitePawns : board.blackPawns, ownPieces, opponentPieces);
+    } 
+    else if (pieceMoving == 'N') {
+        moves = board.generateKnightMoves(board.whiteToMove ? board.whiteKnights : board.blackKnights, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'B') {
+        moves = board.generateBishopMoves(board.whiteToMove ? board.whiteBishops : board.blackBishops, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'R') {
+        moves = board.generateRookMoves(board.whiteToMove ? board.whiteRooks : board.blackRooks, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'Q') {
+        moves = board.generateQueenMoves(board.whiteToMove ? board.whiteQueens : board.blackQueens, ownPieces, opponentPieces);
+    }
+    else if (pieceMoving == 'K') {
+        moves = board.generateKingMoves(board.whiteToMove ? board.whiteKing : board.blackKing, ownPieces, opponentPieces);
+    }
+
+    std::vector<Move> legalMoves;
+    Bitboard store = board.enPassantTarget;
+    bool whiteKingMovedStore = board.whiteKingMoved;
+    bool whiteLRookMovedStore = board.whiteLRookMoved;
+    bool whiteRRookMovedStore = board.whiteRRookMoved;
+    bool blackKingMovedStore = board.blackKingMoved;
+    bool blackLRookMovedStore = board.blackLRookMoved;
+    bool blackRRookMovedStore = board.blackRRookMoved;
+    for (Move& move : moves) {
+        board.makeMove(move);
+        if (!board.amIInCheck(!board.whiteToMove)) {
+            legalMoves.push_back(move);
+        }
+        board.enPassantTarget = store;
+        board.whiteKingMoved = whiteKingMovedStore;
+        board.whiteLRookMoved = whiteLRookMovedStore;
+        board.whiteRRookMoved = whiteRRookMovedStore;
+        board.blackKingMoved = blackKingMovedStore;
+        board.blackLRookMoved = blackLRookMovedStore;
+        board.blackRRookMoved = blackRRookMovedStore;
+        board.undoMove(move);
+
+    }
+
+    for (Move move : legalMoves) {
+
+        if (move.to == toIndex) {
+            if ((file == -1) && (rank == -1)) {
+                return move;
+            }
+            else if ((rank == -1) && (move.from % 8 == file)) {
+                return move;
+            }
+            else if ((file == -1) && (move.from / 8 == rank)) {
+                return move;
+            }
+        }
+    }
+    return Move();
+}
+
+void convertMoves(const std::string& input, Board& board) {
+    std::vector<Move> moveList;
+    std::istringstream inputStream(input);
+    std::string line;
+    while (std::getline(inputStream, line)) {
+        if (line.find('{') != std::string::npos && line.find('}') != std::string::npos) {
+            board.createBoard();
+            std::vector<std::string> movesVec;
+            std::string movesStr = line.substr(line.find('{') + 1, line.find('}') - line.find('{') - 1);
+            std::istringstream movesStream(movesStr);
+            std::string move;
+            while (std::getline(movesStream, move, ',')) {
+                move.erase(remove_if(move.begin(), move.end(), isspace), move.end()); // Remove spaces
+                movesVec.push_back(move);
+            }
+
+            for (const auto& moveStr : movesVec) {
+
+
+                Move move = parseMove(moveStr, board);
+                if (move.from == -1) {
+                    
+                    std::cout << "ERROR" << std::endl;
+                    break;
+                }
+                uint64_t hash = board.generateZobristHash();
+                TT_Entry* ttEntry = board.probeTranspositionTable(hash);
+                board.record_tt_entry(hash, 0, HASH_BOOK, move, 0);
+                board.makeMove(move);
+            }
+        }
+    }
+}
+
+
+int main32() {
+    Board board;
+    initializeZobristTable();
+    std::ifstream file("StartingMoves.txt");
+    if (!file.is_open()) {
+        std::cerr << "Unable to open file" << std::endl;
+        return 1;
+    }
+
+    std::string line;
+    std::string buffer;
+    int lineCount = 0;
+    const int chunkSize = 1;
+
+    while (std::getline(file, line)) {
+        buffer += line + "\n";
+        lineCount++;
+
+        if (lineCount == chunkSize) {
+            convertMoves(buffer, board);
+            buffer.clear();
+            lineCount = 0;
+        }
+    }
+
+    // Process any remaining lines if they exist
+    if (!buffer.empty()) {
+        convertMoves(buffer, board);
+    }
+    std::cout << "Number of entries in the transposition table: " << board.countTranspositionTableEntries() << std::endl;
+
+    // Save the transposition table to a file
+    saveTranspositionTable("transposition_table.dat", board);
+
+    file.close();
     return 0;
 }
