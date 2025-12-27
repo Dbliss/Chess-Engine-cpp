@@ -21,16 +21,10 @@
     <ClCompile Include="chess.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="engine.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="BoardDisplay.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="engine2.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="chess2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="zobrist.cpp">
@@ -38,16 +32,13 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="chess.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="engine.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
+    <Text Include="StartingMoves.txt" />
+  </ItemGroup>
+  <ItemGroup>
     <ClInclude Include="BoardDisplay.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="chess2.h">
+    <ClInclude Include="chess.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="engine2.h">
@@ -58,6 +49,52 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <Text Include="StartingMoves.txt" />
+    <Image Include="..\..\..\Downloads\Chess_bdt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_blt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_kdt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_klt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_ndt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_nlt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_pdt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_qdt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_qlt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_rdt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_rlt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+    <Image Include="..\..\..\Downloads\Chess_plt60.png">
+      <Filter>Resource Files</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <Media Include="..\..\..\Downloads\capture.wav">
+      <Filter>Resource Files</Filter>
+    </Media>
+    <Media Include="..\..\..\Downloads\move-check.wav">
+      <Filter>Resource Files</Filter>
+    </Media>
+    <Media Include="..\..\..\Downloads\move-self.wav">
+      <Filter>Resource Files</Filter>
+    </Media>
   </ItemGroup>
 </Project>

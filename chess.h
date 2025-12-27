@@ -110,6 +110,8 @@ public:
 
     std::unordered_map<uint64_t, int> positionHistory;
     Move killerMoves[2][64]; // Two killer moves per depth, up to depth of 64
+    int64_t historyHeuristic[12][64];
+    int64_t maxHistoryValue;
 
     Board();
     void createBoard();
@@ -145,7 +147,8 @@ public:
     size_t countTranspositionTableEntries() const;
     void makeNullMove();
     void undoNullMove();
-
+    int posToValue(int from);
+    void updateHistory(int from, int to, int bonus);
     void loadOpeningBook();
 };
 
@@ -153,8 +156,12 @@ public:
 void setBit(Bitboard& bitboard, int square);
 void parseFEN(const std::string& fen, Board& board);
 std::string numToBoardPosition(int num);
-std::vector<Move> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
+std::vector<std::pair<Move, uint64_t>> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
+std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
 bool isTacticalPosition(std::vector<Move> moves, Board board);
 bool isNullViable(Board& board);
 Move convertToMoveObject(const std::string& moveStr);
 int boardPositionToIndex(const std::string& pos);
+int isGoodCapture(const Move& move, const Board& board);
+bool isEqualCapture(const Move& move, const Board& board);
+int getPieceValue(char piece);

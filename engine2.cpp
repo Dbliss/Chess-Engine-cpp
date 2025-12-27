@@ -1,12 +1,17 @@
-#include "engine.h"
+#include "engine2.h"
 #include <iostream>
 #include <chrono>
 #include "engine2.h"
 #include <vector>
 #include <algorithm>
 #include <tuple>
+#include <math.h>
+#include <atomic>
 
 std::chrono::time_point<std::chrono::high_resolution_clock> endTime2;
+int iterativeDeepeningCallCount2;
+bool isPonderingRunning;
+std::atomic<bool> isPaused(false);
 
 const int64_t pawn_pcsq[64] = {
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -107,6 +112,18 @@ auto addIncentiveForPiece = [&](uint64_t pieces, uint64_t enemyKing, const int i
     return incentive;
 };
 
+bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights, int numBlackBishops) {
+    int totalWhite = numWhiteKnights + numWhiteBishops;
+    int totalBlack = numBlackKnights + numBlackBishops;
+
+    // Specific configurations for win/draw
+    if (std::abs(totalWhite - totalBlack) >= 3) return false; // 3 pieces up, win
+    if (numWhiteKnights == 1 && numWhiteBishops == 2 && totalBlack <= 1) return false; // NBB against 1 or less, win
+    if (numBlackKnights == 1 && numBlackBishops == 2 && totalWhite <= 1) return false; // NBB against 1 or less, win
+    if ((numWhiteBishops == 2 && totalBlack == 0) || (numBlackBishops == 2 && totalWhite == 0)) return false; // BB against nothing, win
+    return true;
+}
+
 double_t evaluate2(Board& board);
 
 double_t evaluate2(Board& board) {
@@ -137,12 +154,11 @@ double_t evaluate2(Board& board) {
     // Encourage draws if both sides have no pawns or major pieces left and only up to one minor piece each.
     if (!numWhitePawns && !numBlackPawns &&
         !numWhiteQueens && !numBlackQueens &&
-        !numWhiteRooks && !numBlackRooks &&
-        (numWhiteBishops + numWhiteKnights <= 1) &&
-        (numBlackBishops + numBlackKnights <= 1)) {
+        !numWhiteRooks && !numBlackRooks) {
+
 
         // If both sides have at most one minor piece each, this is a draw
-        if (numWhiteBishops + numWhiteKnights + numBlackBishops + numBlackKnights <= 2) {
+        if (isEndgameDraw(numWhiteBishops, numWhiteKnights, numBlackKnights, numBlackBishops)) {
             return board.whiteToMove ? -5 : 5;
         }
     }
@@ -160,8 +176,8 @@ double_t evaluate2(Board& board) {
     int passedPawnBonus[8] = { 0, 10, 20, 30, 50, 70, 90, 0 }; // No bonus on rank 1 and rank 8
 
     // Rank masks
-    Bitboard rankMasks[8] = {
-        0xFFULL, 0xFF00ULL, 0xFF0000ULL, 0xFF000000ULL, 0xFF00000000ULL, 0xFF0000000000ULL, 0xFF000000000000ULL, 0xFF00000000000000ULL
+    Bitboard rankMasks[13] = {
+        0xFFULL, 0xFF00ULL, 0xFF0000ULL, 0xFF000000ULL, 0xFF00000000ULL, 0xFF0000000000ULL, 0xFF000000000000ULL, 0xFF00000000000000ULL, 0x0, 0x0, 0x0, 0x0, 0x0
     };
 
 
@@ -297,19 +313,19 @@ double_t evaluate2(Board& board) {
         }
 
         // estimate how safe king is by how many queen moves
-        int whiteKingProxyMoves = size(board.generateQueenMoves(board.whiteKing, board.whitePieces, board.blackPieces));
+        int whiteKingProxyMoves = static_cast<int>(board.generateQueenMoves(board.whiteKing, board.whitePieces, board.blackPieces).size());
         if (whiteKingProxyMoves <= 1) {
             result -= (2 - whiteKingProxyMoves) * 16;
         }
         else if (whiteKingProxyMoves > 3) {
-            result -= whiteKingProxyMoves * 6;
+            result -= whiteKingProxyMoves * 5;
         }
-        int blackKingProxyMoves = size(board.generateQueenMoves(board.blackKing, board.blackPieces, board.whitePieces));
+        int blackKingProxyMoves = static_cast<int>(board.generateQueenMoves(board.blackKing, board.blackPieces, board.whitePieces).size());
         if (blackKingProxyMoves <= 1) {
             result += (2 - blackKingProxyMoves) * 16;
         }
         else if (blackKingProxyMoves > 3) {
-            result += blackKingProxyMoves * 6;
+            result += blackKingProxyMoves * 5;
         }
     }
 
@@ -394,11 +410,11 @@ double_t evaluate2(Board& board) {
     result += 6 * board.generateRookMoves(board.whiteRooks, board.whitePieces, board.blackPieces).size();
     result -= 6 * board.generateRookMoves(board.blackRooks, board.blackPieces, board.whitePieces).size();
 
-    result += 4 * board.generateQueenMoves(board.whiteQueens, board.whitePieces, board.blackPieces).size();
-    result -= 4 * board.generateQueenMoves(board.blackQueens, board.blackPieces, board.whitePieces).size();
+    result += 6 * board.generateQueenMoves(board.whiteQueens, board.whitePieces, board.blackPieces).size();
+    result -= 6 * board.generateQueenMoves(board.blackQueens, board.blackPieces, board.whitePieces).size();
 
    
-    
+    /**
     // Define incentive arrays for each piece type (example values)
     int pawnIncentive[9] = { 0, 14, 12, 10, 8, 6, 4, 2, 0 };
     int knightIncentive[9] = { 0, 5, 25, 15, 5, 0, 0, 0, 0 };
@@ -435,7 +451,7 @@ double_t evaluate2(Board& board) {
         //result -= addIncentiveForPiece(board.blackRooks, board.whiteKing, rookIncentive);
         //result -= addIncentiveForPiece(board.blackQueens, board.whiteKing, queenIncentive);
     }
-    
+    */
 
     // Lead is expanded as game goes on, incentives trading
     if ((gamePhase > 0.6) && (std::abs(result) > 400)) {
@@ -455,52 +471,42 @@ double_t evaluate2(Board& board) {
 
 std::vector<Move> generateCaptures2(Board& board, std::vector<Move> allMoves);
 std::vector<Move> generateCaptures2(Board& board, std::vector<Move> allMoves) {
-    std::vector<Move> captures;
+    std::vector<std::pair<Move, int>> captures;
 
-    for (Move& move : allMoves) {
-        if (move.isCapture) {
-            captures.push_back(move);
+    for (const Move& move : allMoves) {
+        int score = 0;
+        if (move.isCapture || move.promotion) {
+            if (move.promotion) score += getPieceValue(move.promotion);
+            score += isGoodCapture(move, board);
+            captures.push_back({ move, score });
         }
     }
 
-    // Optional: sort captures based on some heuristic, e.g., MVV-LVA (Most Valuable Victim - Least Valuable Attacker)
-    std::sort(captures.begin(), captures.end(), [](const Move& a, const Move& b) {
-        return a.capturedPiece > b.capturedPiece;
+    // sort captures
+    std::sort(captures.begin(), captures.end(), [](const std::pair<Move, int>& a, const std::pair<Move, int>& b) {
+        return a.second > b.second;
         });
 
-    return captures;
+    // Combine all move categories into the final ordered list
+    std::vector<Move> orderedMoves;
+    for (const auto& pair : captures) orderedMoves.push_back(pair.first);
+    return orderedMoves;
 }
 
 double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta);
 double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta) {
-    uint64_t hash = board.generateZobristHash();
-    TT_Entry* ttEntry = board.probeTranspositionTable(hash);
-
-    if (ttEntry->key == hash && ttEntry->depth == 0) {
-        if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return ttEntry->score;
-        if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER && ttEntry->score >= beta) return ttEntry->score;
-        if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER && ttEntry->score <= alpha) return ttEntry->score;
-    }
-
-    double_t stand_pat = evaluate2(board);
-    if (stand_pat >= beta) {
-        return beta;
-    }
-    if (alpha < stand_pat) {
-        alpha = stand_pat;
-    }
+    std::vector<Move> allMoves = board.generateAllMoves();
     double_t checkmate = -20000;
     double_t draw = 0;
-    std::vector<Move> allMoves = board.generateAllMoves();
-    if (allMoves.empty()) {
-        return { board.amIInCheck(board.whiteToMove) ? checkmate : draw };
+    if (allMoves.empty()) return { board.amIInCheck(board.whiteToMove) ? checkmate : draw };
+    double_t bestScore = evaluate2(board);
+    iterativeDeepeningCallCount2++;
+    if (bestScore > alpha) {
+        alpha = bestScore;
+        if (alpha >= beta) return bestScore;
     }
     std::vector<Move> moves = generateCaptures2(board, allMoves);
-
-
-    moves = orderMoves(board, moves, ttEntry, 0);
-
-    double_t subBestScore;
+    double_t subScore;
     Bitboard store = board.enPassantTarget;
     bool whiteKingMovedStore = board.whiteKingMoved;
     bool whiteLRookMovedStore = board.whiteLRookMoved;
@@ -508,16 +514,11 @@ double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta) {
     bool blackKingMovedStore = board.blackKingMoved;
     bool blackLRookMovedStore = board.blackLRookMoved;
     bool blackRRookMovedStore = board.blackRRookMoved;
+    Bitboard enPassantPrev = board.enPassantTarget;
 
     for (Move& move : moves) {
         board.makeMove(move);
-        if (!board.isThreefoldRepetition()) {
-            subBestScore = -quiescenceSearch2(board, -beta, -alpha);
-        }
-        else {
-            subBestScore = 0;
-        }
-
+        subScore = -quiescenceSearch2(board, -beta, -alpha);
         board.enPassantTarget = store;
         board.whiteKingMoved = whiteKingMovedStore;
         board.whiteLRookMoved = whiteLRookMovedStore;
@@ -525,92 +526,109 @@ double_t quiescenceSearch2(Board& board, double_t alpha, double_t beta) {
         board.blackKingMoved = blackKingMovedStore;
         board.blackLRookMoved = blackLRookMovedStore;
         board.blackRRookMoved = blackRRookMovedStore;
+        board.enPassantTarget = enPassantPrev;
         board.undoMove(move);
 
-        if (subBestScore >= beta) {
-            return beta;
+        if (subScore > bestScore) {
+            bestScore = subScore;
         }
-        if (subBestScore > alpha) {
-            alpha = subBestScore;
+        if (subScore > alpha) {
+            alpha = bestScore;
         }
         if (alpha >= beta) {
             break;
         }
     }
-    return alpha;
+    return bestScore;
 }
 
-std::tuple<Move, double_t> perft2(Board& board, int depth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, double_t alpha, double_t beta){
+std::tuple<Move, double_t> engine2Start(Board& board, int depth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, double_t alpha, double_t beta) {
     double bestScore;
     Move bestMove;
-    std::tie(bestMove, bestScore) = perftHelper2(board, depth, alpha, beta, depth, iterativeDeepeningMoves, 0, false);
+    std::tie(bestMove, bestScore) = engine2(board, depth, alpha, beta, depth, iterativeDeepeningMoves, 0, false);
     return { bestMove, bestScore };
 }
-
-std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha, double_t beta, int startDepth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, int totalExtensions, bool lastIterationNull) {
+/**
+std::tuple<Move, double_t> engine2(Board& board, int depth, double_t alpha, double_t beta, int startDepth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, int totalExtensions, bool lastIterationNull) {
     if (std::chrono::high_resolution_clock::now() > endTime2) {
         return { Move(), -1.2345 };
     }
+
     const int MAX_EXTENSIONS = 3;
     const int MAX_EXTENSION_DEPTH = 3;
-    const double_t INITIAL_WINDOW = 50.0; // Initial aspiration window value
     int extension = 0;
-    
+    double_t originalAlpha = alpha;
+    Move bestMove;
+    double_t bestScore = -100000;
+
     uint64_t hash = board.generateZobristHash();
     TT_Entry* ttEntry = board.probeTranspositionTable(hash);
 
     if (ttEntry->key == hash) {
-        if (depth == startDepth && ttEntry->flag == TTFlag::HASH_BOOK) {
+        if (depth == startDepth && ttEntry->flag == TTFlag::HASH_BOOK) { 
             return { ttEntry->move, 0 };
         }
         else if (ttEntry->depth >= depth) {
             if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return { ttEntry->move, ttEntry->score };
-            if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER && ttEntry->score >= beta) return { ttEntry->move, ttEntry->score };
-            if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER && ttEntry->score <= alpha) return { ttEntry->move, ttEntry->score };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER) { 
+                if (ttEntry->score > alpha) {
+                    alpha = ttEntry->score;
+                }
+            };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER) {
+                if (ttEntry->score < beta) {
+                    beta = ttEntry->score;
+                }
+            }
+            bestMove = ttEntry->move;
+            bestScore = ttEntry->score;
+            if (alpha >= beta) {
+                return { ttEntry->move, ttEntry->score };
+            }
         }
     }
 
     std::vector<Move> moves;
-    if (depth == startDepth && !iterativeDeepeningMoves.empty()) {
+    std::vector<uint64_t> scores;
+    std::vector<std::pair<Move, uint64_t>> allMoves;
+    if ((depth == startDepth && !iterativeDeepeningMoves.empty())) {
         std::transform(iterativeDeepeningMoves.begin(), iterativeDeepeningMoves.end(), std::back_inserter(moves),
             [](const std::tuple<Move, double_t>& pair) { return std::get<0>(pair); });
-    } else {
+    }
+    else {
         moves = board.generateAllMoves();
         if (moves.empty()) {
-            if (board.amIInCheck(board.whiteToMove)) {
-                return { Move(), -20000 }; // checkmate
-            } else {
-                return { Move(), 0 }; // stalemate
-            }
-        } else if (depth == 0) {
+            return { Move() , board.amIInCheck(board.whiteToMove) ? -20000 : 0 };
+        }
+        if (depth == 0) {
             double_t val = quiescenceSearch2(board, alpha, beta);
             return { Move(), val };
         }
-        moves = orderMoves(board, moves, ttEntry, depth);
+        moves = orderMoves2(board, moves, ttEntry, depth);        
     }
-  
+
     // Null Move Pruning
     if (!board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull && depth != startDepth) {
         board.makeNullMove();
         int R = 2;
-        std::tuple<Move, double_t> result = perftHelper2(board, depth - 1 - R, -beta, -beta + 1, startDepth, iterativeDeepeningMoves, totalExtensions, true);
+        std::tuple<Move, double_t> result = engine2(board, depth - 1 - R, -beta, -beta + 1, startDepth, iterativeDeepeningMoves, totalExtensions, true);
         double_t nullMoveEvaluation = -std::get<1>(result);
         board.undoNullMove();
 
+        // null move cutoff
         if (nullMoveEvaluation >= beta) {
             return { Move(), beta }; // Cutoff
         }
 
-        // mate threat or something?
-        if (totalExtensions < MAX_EXTENSIONS) {
+        // mate threat extension
+        if (totalExtensions < MAX_EXTENSIONS && depth <= MAX_EXTENSION_DEPTH) {
             if (nullMoveEvaluation + 100 <= alpha) {
-                extension = 1;
+                depth += 1;
+                totalExtensions += 1;
             }
         }
     }
 
-    Move bestMove;
-    double_t bestScore = -100000;
     Bitboard store = board.enPassantTarget;
     bool whiteKingMovedStore = board.whiteKingMoved;
     bool whiteLRookMovedStore = board.whiteLRookMoved;
@@ -618,40 +636,41 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
     bool blackKingMovedStore = board.blackKingMoved;
     bool blackLRookMovedStore = board.blackLRookMoved;
     bool blackRRookMovedStore = board.blackRRookMoved;
+    Bitboard enPassantPrev = board.enPassantTarget;
     double_t subBestScore;
     Move subBestMove;
     std::vector<std::tuple<Move, double_t>> moveScores;
-
-    for (int i = 0; i < moves.size(); i++) {
+    for (int i = 0; i < size(moves); i++) {
         Move& move = moves[i];
         board.makeMove(move);
 
         if (!board.isThreefoldRepetition()) {
+            if (depth >= 4) {
+                // Determine the extension/reduction
+                if (i >= (size(moves) * 4 / 5) && !move.isCapture) {
+                    extension = -2;
+                }
+                else if (i >= 3 && !move.isCapture) {
+                    extension = -1;
+                }
+            }
             bool needsFullSearch = true;
-            if (i >= 3 && extension == 0 && depth >= 4 && !move.isCapture) {
-                int depthReduction;
-
-                if (i >= (moves.size() * 4 / 5)) {
-                    depthReduction = 2;
-                }
-                else {
-                    depthReduction = 1;
-                }
-                std::tie(subBestMove, subBestScore) = perftHelper2(board, depth - 1 - depthReduction, -beta, -alpha, startDepth, iterativeDeepeningMoves, totalExtensions, false);
+            // Lets do a reduced depth search for the less promising moves
+            if (extension < 0) {
+                std::tie(subBestMove, subBestScore) = engine2(board, depth - 1 + extension, -beta, -alpha, startDepth, iterativeDeepeningMoves, totalExtensions, false);
                 subBestScore = -subBestScore;
-
                 needsFullSearch = subBestScore > alpha;
+                extension = 0;
             }
 
             if (needsFullSearch) {
-                std::tie(subBestMove, subBestScore) = perftHelper2(board, depth - 1 + extension, -beta, -alpha, startDepth, iterativeDeepeningMoves, totalExtensions + extension, false);
+                std::tie(subBestMove, subBestScore) = engine2(board, depth - 1 + extension, -beta, -alpha, startDepth, iterativeDeepeningMoves, totalExtensions + extension, false);
                 subBestScore = -subBestScore;
             }
         }
         else {
             subBestScore = 0;
         }
-
         board.enPassantTarget = store;
         board.whiteKingMoved = whiteKingMovedStore;
         board.whiteLRookMoved = whiteLRookMovedStore;
@@ -659,24 +678,16 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
         board.blackKingMoved = blackKingMovedStore;
         board.blackLRookMoved = blackLRookMovedStore;
         board.blackRRookMoved = blackRRookMovedStore;
+        board.enPassantTarget = enPassantPrev;
         board.undoMove(move);
 
+        // Out of time
         if (subBestScore == 1.2345) {
             return { Move(), -1.2345 };
         }
 
         if (depth == startDepth) {
             moveScores.emplace_back(move, subBestScore);
-        }
-
-        if (subBestScore >= beta) {
-            // Record the killer move if it isnt a capture
-            if (board.killerMoves[0][depth] != move && !move.isCapture && board.killerMoves[1][depth] != move) {
-                board.killerMoves[1][depth] = board.killerMoves[0][depth];
-                board.killerMoves[0][depth] = move;
-            }
-            board.record_tt_entry(hash, beta, HASH_FLAG_LOWER, move, depth);
-            return { move, beta };
         }
 
         if (subBestScore > bestScore) {
@@ -689,19 +700,358 @@ std::tuple<Move, double_t> perftHelper2(Board& board, int depth, double_t alpha,
         }
 
         if (alpha >= beta) {
+            // Update history heuristic
+
+            if (!move.isCapture) {
+                board.updateHistory(move.from, move.to, pow(depth, 2));
+            }
+
+            // Record the killer move if it is not a capture 
+            if (board.killerMoves[0][depth] != move && !move.isCapture && board.killerMoves[1][depth] != move) {
+                board.killerMoves[1][depth] = board.killerMoves[0][depth];
+                board.killerMoves[0][depth] = move;
+            }
             break;
         }
     }
 
+
     if (depth == startDepth) {
+        // Sort moves based on scores for next iterative deepening step
         std::sort(moveScores.begin(), moveScores.end(), [](const std::tuple<Move, double_t>& a, const std::tuple<Move, double_t>& b) {
             return std::get<1>(a) > std::get<1>(b); // Sort descending by score
             });
-        iterativeDeepeningMoves = moveScores;
+        iterativeDeepeningMoves = moveScores; // Update iterativeDeepeningMoves for next iteration
     }
 
-    TTFlag flag = (bestScore <= alpha) ? HASH_FLAG_UPPER : HASH_FLAG_EXACT;
+    TTFlag flag;
+    if (bestScore <= originalAlpha) {
+        flag = HASH_FLAG_UPPER;
+    }
+    else if (bestScore >= beta) {
+        flag = HASH_FLAG_LOWER;
+    }
+    else {
+        flag = HASH_FLAG_EXACT;
+    }
     board.record_tt_entry(hash, bestScore, flag, bestMove, depth);
+    if (!bestMove.isCapture && flag != HASH_FLAG_EXACT) {
+        board.updateHistory(bestMove.from, bestMove.to, pow(depth, 2));
+    }
+    return { bestMove, bestScore };
+}
+*/
+std::tuple<Move, double_t> engine2(Board& board, int depth, double_t alpha, double_t beta, int startDepth, std::vector<std::tuple<Move, double_t>>& iterativeDeepeningMoves, int totalExtensions, bool lastIterationNull) {
+    if (std::chrono::high_resolution_clock::now() > endTime2) return { Move(), -1.2345 };
+    if (depth == 0) return { Move(), quiescenceSearch2(board, alpha, beta) };
+
+    double_t originalAlpha = alpha;
+    Move bestMove;
+    double_t bestScore = -100000;
+
+    uint64_t hash = board.generateZobristHash();
+    TT_Entry* ttEntry = board.probeTranspositionTable(hash);
+
+    if (ttEntry->key == hash) {
+        if (depth == startDepth && ttEntry->flag == TTFlag::HASH_BOOK) {
+            return { ttEntry->move, 0 };
+        }
+        if (ttEntry->depth >= depth) {
+            if (ttEntry->flag == TTFlag::HASH_FLAG_EXACT) return { ttEntry->move, ttEntry->score };
+            if (ttEntry->flag == TTFlag::HASH_FLAG_LOWER) alpha = std::max(static_cast<int>(alpha), ttEntry->score);
+            if (ttEntry->flag == TTFlag::HASH_FLAG_UPPER) beta = std::min(static_cast<int>(beta), ttEntry->score);
+            if (alpha >= beta) return { ttEntry->move, ttEntry->score };
+        }
+    }
+
+    std::vector<Move> moves = board.generateAllMoves();
+    if (moves.empty()) return { Move() , board.amIInCheck(board.whiteToMove) ? -20000 : 0 };
+    moves = orderMoves2(board, moves, ttEntry, depth);
+    int extension = 0;
+    // Null Move Pruning
+    if (!board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull && depth != startDepth) {
+        board.makeNullMove();
+        int R = 2;
+        std::tuple<Move, double_t> result = engine2(board, depth - 1 - R, -beta, -beta + 1, startDepth, iterativeDeepeningMoves, totalExtensions, true);
+        double_t nullMoveEvaluation = -std::get<1>(result);
+        board.undoNullMove();
+
+        // null move cutoff
+        if (nullMoveEvaluation >= beta) {
+            return { Move(), beta }; // Cutoff
+        }
+
+        // mate threat extension
+        if (totalExtensions < 3 && depth <= 3) {
+            if (nullMoveEvaluation + 100 <= alpha) {
+                extension += 1;
+            }
+        }
+    }
+
+
+    Bitboard store = board.enPassantTarget;
+    bool whiteKingMovedStore = board.whiteKingMoved;
+    bool whiteLRookMovedStore = board.whiteLRookMoved;
+    bool whiteRRookMovedStore = board.whiteRRookMoved;
+    bool blackKingMovedStore = board.blackKingMoved;
+    bool blackLRookMovedStore = board.blackLRookMoved;
+    bool blackRRookMovedStore = board.blackRRookMoved;
+    Bitboard enPassantPrev = board.enPassantTarget;
+    double_t subBestScore;
+    Move subBestMove;
+    std::vector<std::tuple<Move, double_t>> moveScores;
+
+    for (int i = 0; i < size(moves); i++) {
+        Move& move = moves[i];
+        board.makeMove(move);
+        int ext = extension;
+        if (!board.isThreefoldRepetition()) {
+            if (depth >= 4 && !move.isCapture) {
+                // Determine the extension/reduction
+                if (i >= 3) {
+                    ext = -1;
+                }
+            }
+            bool needsFullSearch = true;
+            // Lets do a reduced depth search for the less promising moves
+            if (extension < 0) {
+                std::tie(subBestMove, subBestScore) = engine2(board, depth - 1 + ext, -beta, -alpha, startDepth, iterativeDeepeningMoves, totalExtensions, false);
+                subBestScore = -subBestScore;
+                needsFullSearch = subBestScore > alpha;
+                extension = 0;
+            }
+
+            if (needsFullSearch) {
+                std::tie(subBestMove, subBestScore) = engine2(board, depth - 1 + extension, -beta, -alpha, startDepth, iterativeDeepeningMoves, totalExtensions + extension, false);
+                subBestScore = -subBestScore;
+            }
+        }
+        else {
+            subBestScore = 0;
+        }
+        board.enPassantTarget = store;
+        board.whiteKingMoved = whiteKingMovedStore;
+        board.whiteLRookMoved = whiteLRookMovedStore;
+        board.whiteRRookMoved = whiteRRookMovedStore;
+        board.blackKingMoved = blackKingMovedStore;
+        board.blackLRookMoved = blackLRookMovedStore;
+        board.blackRRookMoved = blackRRookMovedStore;
+        board.enPassantTarget = enPassantPrev;
+        board.undoMove(move);
+
+        // Out of time
+        if (subBestScore == 1.2345) {
+            return { Move(), -1.2345 };
+        }
+
+        if (subBestScore > bestScore) {
+            bestScore = subBestScore;
+            bestMove = move;
+        }
+
+        alpha = std::max(alpha, subBestScore);
+
+        if (alpha >= beta) {
+            // Update history heuristic
+            if (!move.isCapture) {
+                board.updateHistory(move.from, move.to, static_cast<int>(pow(depth, 2)));
+            }
+
+            // Record the killer move if it is not a capture 
+            if (board.killerMoves[0][depth] != move && !move.isCapture && board.killerMoves[1][depth] != move) {
+                board.killerMoves[1][depth] = board.killerMoves[0][depth];
+                board.killerMoves[0][depth] = move;
+            }
+            break;
+        }
+    }
+
+    TTFlag flag;
+    if (bestScore <= originalAlpha) {
+        flag = HASH_FLAG_UPPER;
+    }
+    else if (bestScore >= beta) {
+        flag = HASH_FLAG_LOWER;
+    }
+    else {
+        flag = HASH_FLAG_EXACT;
+    }
+    board.record_tt_entry(hash, static_cast<int>(bestScore), flag, bestMove, depth);
+    if (!bestMove.isCapture && flag != HASH_FLAG_EXACT) {
+        board.updateHistory(bestMove.from, bestMove.to, static_cast<int>(pow(depth, 2)));
+    }
 
     return { bestMove, bestScore };
+}
+
+/**
+Move getEngineMove2(Board& board, int timeLimit) {
+    endTime2 = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(timeLimit);
+    std::chrono::time_point<std::chrono::high_resolution_clock> startTime = std::chrono::high_resolution_clock::now();
+    double_t bestScore = 0;
+    double_t prevBestScore = 0;
+    Move bestMove;
+    Move prevBestMove;
+    Move ultimateMove;
+    double_t inf = 99999;
+    int depth = 0;
+    iterativeDeepeningCallCount2 = 0;
+    std::vector<std::tuple<Move, double_t>> iterativeDeepeningMoves;
+
+    while (depth < 100) {
+        depth++;
+        double_t delta = 25;
+        ultimateMove = prevBestMove;
+        if (std::abs(prevBestScore) > 10000 || bestScore == -1.2345) {
+            break;
+        }
+        double_t alpha = std::max(prevBestScore - delta, -inf);
+        double_t beta = std::min(prevBestScore + delta, inf);
+
+        while (true) {
+            std::tie(bestMove, bestScore) = engine2Start(board, depth, iterativeDeepeningMoves, alpha, beta);
+            if (std::abs(bestScore) > 10000 && bestMove.from != -1) {
+                std::cout << "Mate in " << depth << std::endl;
+                return bestMove;
+            }
+
+            // Timeout or stop search
+            if (bestScore == -1.2345) {
+                break;
+            }
+            else if (bestMove.to != -1 && bestMove.from != -1) {
+                prevBestMove = bestMove;
+                prevBestScore = bestScore;
+                if (bestScore <= alpha) {
+                    beta = (alpha + beta) / 2;
+                    alpha = std::max(bestScore - delta, -inf);
+                }
+                else if (bestScore >= beta) {
+                    beta = std::min(bestScore + delta, inf);
+                }
+                else {
+                    break;
+                }
+                delta += delta * 3 / 2;
+            }
+            else {
+                std::cout << "MINOR ERROR ENGINE2" << std::endl;
+                std::cout << " Eval: " << prevBestScore << std::endl;
+            }
+        }
+        for (int i = 0; i < 12; ++i) {
+            for (int j = 0; j < 64; ++j) {
+                board.historyHeuristic[i][j] = board.historyHeuristic[i][j] << 1;
+            }
+        }
+    }
+
+    if (ultimateMove.from == -1) {
+        std::cout << "MAJOR ERROR ENGINE2" << std::endl;
+        ultimateMove = getEngineMove2(board, timeLimit * 2);
+    }
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = currentTime - startTime;
+    std::cout << "Engine 2 | Move: " << numToBoardPosition(ultimateMove.from) << numToBoardPosition(ultimateMove.to) << " | Eval: " << prevBestScore << " depth: " << depth << " Positions Analysed: " << iterativeDeepeningCallCount2 << " Took: " << elapsed.count() << std::endl;
+    return ultimateMove;
+}
+*/
+Move getEngineMove2(Board& board, int timeLimit) {
+    endTime2 = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(timeLimit);
+    std::chrono::time_point<std::chrono::high_resolution_clock> startTime = std::chrono::high_resolution_clock::now();
+    double_t bestScore = 0;
+    double_t prevBestScore = 0;
+    Move bestMove;
+    Move prevBestMove;
+    double_t inf = 99999;
+    int depth = 0;
+    iterativeDeepeningCallCount2 = 0;
+    std::vector<std::tuple<Move, double_t>> iterativeDeepeningMoves;
+
+    while (depth < 100) {
+        depth++;
+        double_t alpha = -inf;
+        double_t beta = inf;
+
+        std::tie(bestMove, bestScore) = engine2Start(board, depth, iterativeDeepeningMoves, alpha, beta);
+        if (std::abs(bestScore) > 10000 && bestMove.from != -1) {
+            std::cout << "Mate in " << depth << std::endl;
+            board.clear_tt();
+            return bestMove;
+        }
+
+        // Timeout or stop search
+        if (bestScore == -1.2345) {
+            break;
+        }
+        else if (bestMove.to != -1 && bestMove.from != -1) {
+            prevBestMove = bestMove;
+            prevBestScore = bestScore;
+        }
+        else {
+            std::cout << "MINOR ERROR ENGINE2" << std::endl;
+            std::cout << " Eval: " << prevBestScore << std::endl;
+        }
+    }
+    for (int i = 0; i < 12; ++i) {
+        for (int j = 0; j < 64; ++j) {
+            board.historyHeuristic[i][j] = board.historyHeuristic[i][j] << 1;
+        }
+    }
+    auto currentTime = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = currentTime - startTime;
+    std::cout << "Engine 2 | Move: " << numToBoardPosition(prevBestMove.from) << numToBoardPosition(prevBestMove.to) << " | Eval: " << prevBestScore << " depth: " << depth << " Positions Analysed: " << iterativeDeepeningCallCount2 << " Took: " << elapsed.count() << std::endl;
+    return prevBestMove;
+}
+
+// Pondering function
+void ponderEngine2(Board& board) {
+    double_t bestScore = 0;
+    double_t prevBestScore = 0;
+    Move bestMove;
+    Move prevBestMove;
+    double_t inf = 99999;
+    int depth = 0;
+    iterativeDeepeningCallCount2 = 0;
+    std::vector<std::tuple<Move, double_t>> iterativeDeepeningMoves;
+    isPonderingRunning = true;
+
+    while (true) {
+        if (!isPonderingRunning) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            depth = 1;
+            continue;
+        }
+        else if (depth > 100 || bestScore == 1.2345 || prevBestScore > 10000) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        depth++;
+        double_t delta = 25;
+        double_t alpha = std::max(prevBestScore - delta, -inf);
+        double_t beta = std::min(prevBestScore + delta, inf);
+
+        while (true) {
+            std::tie(bestMove, bestScore) = engine2Start(board, depth, iterativeDeepeningMoves, alpha, beta);
+            // Timeout or stop search
+            if (bestScore == -1.2345) {
+                break;
+            }
+            prevBestMove = bestMove;
+            prevBestScore = bestScore;
+            if (bestScore <= alpha) {
+                beta = (alpha + beta) / 2;
+                alpha = std::max(bestScore - delta, -inf);
+            }
+            else if (bestScore >= beta) {
+                beta = std::min(bestScore + delta, inf);
+            }
+            else {
+                break;
+            }
+            delta += delta * 3 / 2;
+        }
+    }
 }

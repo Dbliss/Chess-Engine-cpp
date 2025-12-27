@@ -11,7 +11,6 @@ uint64_t zobristCastling[NUM_CASTLING_RIGHTS];
 uint64_t zobristEnPassant[NUM_EN_PASSANT_FILES];
 uint64_t zobristSideToMove;
 
-
 // Function to generate random numbers
 std::vector<uint64_t> generateRandomNumbers(size_t count, uint64_t seed)
 {
@@ -26,7 +25,6 @@ std::vector<uint64_t> generateRandomNumbers(size_t count, uint64_t seed)
 
     return std::vector<uint64_t>(randomNumbers.begin(), randomNumbers.end());
 }
-
 
 void initializeZobristTable() {
     // Generate random numbers

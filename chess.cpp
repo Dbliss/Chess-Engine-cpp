@@ -35,47 +35,6 @@ unsigned int ctzll(unsigned long long x) {
         return 64; // Define behavior for x == 0
 }
 
-/**
-// Function to serialize a Move object
-std::ostream& operator<<(std::ostream& os, const Move& move) {
-    os.write(reinterpret_cast<const char*>(&move.from), sizeof(move.from));
-    os.write(reinterpret_cast<const char*>(&move.to), sizeof(move.to));
-    os.write(reinterpret_cast<const char*>(&move.promotion), sizeof(move.promotion));
-    os.write(reinterpret_cast<const char*>(&move.isCapture), sizeof(move.isCapture));
-    os.write(reinterpret_cast<const char*>(&move.capturedPiece), sizeof(move.capturedPiece));
-    return os;
-}
-
-// Function to deserialize a Move object
-std::istream& operator>>(std::istream& is, Move& move) {
-    is.read(reinterpret_cast<char*>(&move.from), sizeof(move.from));
-    is.read(reinterpret_cast<char*>(&move.to), sizeof(move.to));
-    is.read(reinterpret_cast<char*>(&move.promotion), sizeof(move.promotion));
-    is.read(reinterpret_cast<char*>(&move.isCapture), sizeof(move.isCapture));
-    is.read(reinterpret_cast<char*>(&move.capturedPiece), sizeof(move.capturedPiece));
-    return is;
-}
-
-// Function to serialize a TT_Entry object
-std::ostream& operator<<(std::ostream& os, const TT_Entry& entry) {
-    os.write(reinterpret_cast<const char*>(&entry.key), sizeof(entry.key));
-    os.write(reinterpret_cast<const char*>(&entry.score), sizeof(entry.score));
-    os.write(reinterpret_cast<const char*>(&entry.depth), sizeof(entry.depth));
-    os.write(reinterpret_cast<const char*>(&entry.flag), sizeof(entry.flag));
-    os << entry.move;
-    return os;
-}
-
-// Function to deserialize a TT_Entry object
-std::istream& operator>>(std::istream& is, TT_Entry& entry) {
-    is.read(reinterpret_cast<char*>(&entry.key), sizeof(entry.key));
-    is.read(reinterpret_cast<char*>(&entry.score), sizeof(entry.score));
-    is.read(reinterpret_cast<char*>(&entry.depth), sizeof(entry.depth));
-    is.read(reinterpret_cast<char*>(&entry.flag), sizeof(entry.flag));
-    is >> entry.move;
-    return is;
-}
-*/
 // Constructor to initialize the board
 Board::Board() {
     createBoard();
@@ -83,6 +42,7 @@ Board::Board() {
     resize_tt(64);  // Calls the resize function to allocate memory
     clear_tt();     // Clear the table to reset all entries
     loadOpeningBook();
+    maxHistoryValue = 0x0000000000000100;
     //std::cout << "Number of entries in the transposition table: " << countTranspositionTableEntries() << std::endl;
 }
 
@@ -193,9 +153,9 @@ void Board::printBoard() {
     std::cout << "FEN: " << fenStream.str() << std::endl;
 }
 
-
 std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
+    moves.reserve(64);
     Bitboard emptySquares = ~(ownPieces | opponentPieces);
     Bitboard promotionRank = whiteToMove ? 0xFF00000000000000 : 0x00000000000000FF;
 
@@ -305,6 +265,7 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
 
 std::vector<Move> Board::generateBishopMoves(Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
+    moves.reserve(32);
     Bitboard occupiedSquares = ownPieces | opponentPieces;
     const int directions[4] = { 9, 7, -9, -7 };
 
@@ -338,6 +299,7 @@ std::vector<Move> Board::generateBishopMoves(Bitboard bishops, Bitboard ownPiece
 
 std::vector<Move> Board::generateRookMoves(Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
+    moves.reserve(64);
     Bitboard occupiedSquares = ownPieces | opponentPieces;
     const int directions[4] = { 8, -8, 1, -1 };
     while (rooks) {
@@ -372,6 +334,7 @@ std::vector<Move> Board::generateRookMoves(Bitboard rooks, Bitboard ownPieces, B
 
 std::vector<Move> Board::generateKnightMoves(Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
+    moves.reserve(32);
     const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
 
     while (knights) {
@@ -399,6 +362,7 @@ std::vector<Move> Board::generateKnightMoves(Bitboard knights, Bitboard ownPiece
 
 std::vector<Move> Board::generateKingMoves(Bitboard king, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
+    moves.reserve(32);
     const int kingMoves[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
 
     int from = ctzll(king);
@@ -448,8 +412,30 @@ std::vector<Move> Board::generateKingMoves(Bitboard king, Bitboard ownPieces, Bi
             }
         }
     }
+    std::vector<Move> legalMoves;
+    Bitboard store = enPassantTarget;
+    bool whiteKingMovedStore = whiteKingMoved;
+    bool whiteLRookMovedStore = whiteLRookMoved;
+    bool whiteRRookMovedStore = whiteRRookMoved;
+    bool blackKingMovedStore = blackKingMoved;
+    bool blackLRookMovedStore = blackLRookMoved;
+    bool blackRRookMovedStore = blackRRookMoved;
+    for (Move& move : moves) {
+        makeMove(move);
+        if (!amIInCheck(!whiteToMove)) {
+            legalMoves.push_back(move);
+        }
+        enPassantTarget = store;
+        whiteKingMoved = whiteKingMovedStore;
+        whiteLRookMoved = whiteLRookMovedStore;
+        whiteRRookMoved = whiteRRookMovedStore;
+        blackKingMoved = blackKingMovedStore;
+        blackLRookMoved = blackLRookMovedStore;
+        blackRRookMoved = blackRRookMovedStore;
+        undoMove(move);
 
-    return moves;
+    }
+    return legalMoves;
 }
 
 bool Board::isSquareAttacked(int square, bool byWhite) {
@@ -514,6 +500,7 @@ bool Board::isSquareAttacked(int square, bool byWhite) {
 
 std::vector<Move> Board::generateQueenMoves(Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
+    moves.reserve(128);
     std::vector<Move> bishopMoves = generateBishopMoves(queens, ownPieces, opponentPieces);
     std::vector<Move> rookMoves = generateRookMoves(queens, ownPieces, opponentPieces);
 
@@ -522,8 +509,13 @@ std::vector<Move> Board::generateQueenMoves(Bitboard queens, Bitboard ownPieces,
     return moves;
 }
 
+bool contains(const std::vector<int>& vec, int value) {
+    return std::find(vec.begin(), vec.end(), value) != vec.end();
+}
+
 std::vector<Move> Board::generateAllMoves() {
     std::vector<Move> allMoves;
+    allMoves.reserve(256);
 
     Bitboard ownPieces = whiteToMove ? whitePieces : blackPieces;
     Bitboard opponentPieces = whiteToMove ? blackPieces : whitePieces;
@@ -541,10 +533,21 @@ std::vector<Move> Board::generateAllMoves() {
     allMoves.insert(allMoves.end(), bishopMoves.begin(), bishopMoves.end());
     allMoves.insert(allMoves.end(), rookMoves.begin(), rookMoves.end());
     allMoves.insert(allMoves.end(), knightMoves.begin(), knightMoves.end());
-    allMoves.insert(allMoves.end(), kingMoves.begin(), kingMoves.end());
     allMoves.insert(allMoves.end(), queenMoves.begin(), queenMoves.end());
+
+    Bitboard ownKing = whiteToMove ? whiteKing : blackKing;
+    // Lets find which pieces might lead to a check if we move them
+    std::vector<Move> kingMobileMoves = generateQueenMoves(ownKing, opponentPieces, ownPieces);
+    std::vector<int> keyDefenderCoords;
+    for (Move& move : kingMobileMoves) {
+        if (move.isCapture) {
+            keyDefenderCoords.push_back(move.to);
+        }
+    }
+
     // Filter out moves that put the king in check
     std::vector<Move> legalMoves;
+    allMoves.reserve(128);
     Bitboard store = enPassantTarget;
     bool whiteKingMovedStore = whiteKingMoved;
     bool whiteLRookMovedStore = whiteLRookMoved;
@@ -552,7 +555,12 @@ std::vector<Move> Board::generateAllMoves() {
     bool blackKingMovedStore = blackKingMoved;
     bool blackLRookMovedStore = blackLRookMoved;
     bool blackRRookMovedStore = blackRRookMoved;
+    bool currentlyInCheck = amIInCheck(whiteToMove);
     for (Move& move : allMoves) {
+        if (!contains(keyDefenderCoords, move.from) && !currentlyInCheck) {
+            legalMoves.push_back(move);
+            continue;
+        }
         makeMove(move);
         if (!amIInCheck(!whiteToMove)) {
             legalMoves.push_back(move);
@@ -567,14 +575,13 @@ std::vector<Move> Board::generateAllMoves() {
         undoMove(move);
 
     }
+    legalMoves.insert(legalMoves.end(), kingMoves.begin(), kingMoves.end());
+
     return legalMoves;
 }
 
 bool Board::amIInCheck(bool player) {
     Bitboard ownKing = player ? whiteKing : blackKing;
-    Bitboard opponentPawns = player ? blackPawns : whitePawns;
-    Bitboard opponentRooks = player ? blackRooks : whiteRooks;
-    Bitboard opponentKnights = player ? blackKnights : whiteKnights;
     Bitboard opponentBishops = player ? blackBishops : whiteBishops;
     Bitboard opponentQueens = player ? blackQueens : whiteQueens;
     Bitboard opponentKing = player ? blackKing : whiteKing;
@@ -582,24 +589,6 @@ bool Board::amIInCheck(bool player) {
     Bitboard enemyPieces = player ? blackPieces : whitePieces;
 
     int kingPos = ctzll(ownKing);
-
-    // Check for pawn attacks
-    Bitboard pawnAttacks = player ? ((opponentPawns >> 7) & 0xFEFEFEFEFEFEFEFE) | ((opponentPawns >> 9) & 0x7F7F7F7F7F7F7F7F)
-        : ((opponentPawns << 7) & 0x7F7F7F7F7F7F7F7F) | ((opponentPawns << 9) & 0xFEFEFEFEFEFEFEFE);
-
-
-    if (pawnAttacks & ownKing) {
-        return true;
-    }
-
-    // Check for knight attacks
-    const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
-    for (int move : knightMoves) {
-        int to = kingPos + move;
-        if (to >= 0 && to < 64 && abs((kingPos % 8) - (to % 8)) <= 2) {
-            if (opponentKnights & (1ULL << to)) return true;
-        }
-    }
 
     // Check for bishop/queen diagonal attacks
     const int bishopDirections[4] = { 9, 7, -9, -7 };
@@ -615,6 +604,7 @@ bool Board::amIInCheck(bool player) {
     }
 
     // Check for rook/queen straight attacks
+    Bitboard opponentRooks = player ? blackRooks : whiteRooks;
     const int rookDirections[4] = { 8, -8, 1, -1 };
     for (int dir : rookDirections) {
         int to = kingPos;
@@ -624,6 +614,26 @@ bool Board::amIInCheck(bool player) {
             Bitboard posMask = 1ULL << to;
             if (opponentRooks & posMask || opponentQueens & posMask) return true;
             if (ownPieces & posMask || enemyPieces & posMask)  break;
+        }
+    }
+
+    // Check for pawn attacks
+    Bitboard opponentPawns = player ? blackPawns : whitePawns;
+    Bitboard pawnAttacks = player ? ((opponentPawns >> 7) & 0xFEFEFEFEFEFEFEFE) | ((opponentPawns >> 9) & 0x7F7F7F7F7F7F7F7F)
+        : ((opponentPawns << 7) & 0x7F7F7F7F7F7F7F7F) | ((opponentPawns << 9) & 0xFEFEFEFEFEFEFEFE);
+
+
+    if (pawnAttacks & ownKing) {
+        return true;
+    }
+
+    // Check for knight attacks
+    const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
+    Bitboard opponentKnights = player ? blackKnights : whiteKnights;
+    for (int move : knightMoves) {
+        int to = kingPos + move;
+        if (to >= 0 && to < 64 && abs((kingPos % 8) - (to % 8)) <= 2) {
+            if (opponentKnights & (1ULL << to)) return true;
         }
     }
 
@@ -1150,11 +1160,11 @@ void Board::updatePositionHistory(bool plus) {
 
 bool Board::isThreefoldRepetition() {
     uint64_t hash = generateZobristHash();
-    return positionHistory[hash] >= 3;
+    return positionHistory[hash] >= 2;
 }
 
 bool Board::isThreefoldRepetition(uint64_t hash) {
-    return positionHistory[hash] >= 3;
+    return positionHistory[hash] >= 2;
 }
 
 int getPieceValue(char piece) {
@@ -1167,7 +1177,7 @@ int getPieceValue(char piece) {
         return 3;
     case 'B':
     case 'b':
-        return 3;
+        return 4;
     case 'R':
     case 'r':
         return 5;
@@ -1182,17 +1192,27 @@ int getPieceValue(char piece) {
     }
 }
 
-bool isGoodCapture(const Move& move, const Board& board) {
+int Board::posToValue(int from) {
+    return getPieceIndex(getPieceAt(from));
+}
+
+int isGoodCapture(const Move& move, const Board& board) {
+    if (!move.isCapture) {
+        return 0;
+    }
     char attackerPiece = board.getPieceAt(move.from);
     char defenderPiece = move.capturedPiece;
 
     int attackerValue = getPieceValue(attackerPiece);
     int defenderValue = getPieceValue(defenderPiece);
-
-    return defenderValue > attackerValue;
+    int sumGain = defenderValue - attackerValue;
+    return sumGain;
 }
 
 bool isEqualCapture(const Move& move, const Board& board) {
+    if (!move.isCapture) {
+        return false;
+    }
     char attackerPiece = board.getPieceAt(move.from);
     char defenderPiece = move.capturedPiece;
 
@@ -1206,66 +1226,93 @@ bool isKillerMove(const Move& move, const Board& board, int depth) {
     return (move == board.killerMoves[0][depth] || move == board.killerMoves[1][depth]);
  }
 
-std::vector<Move> orderMoves(Board & board, const std::vector<Move>&moves, TT_Entry * ttEntry, int depth) {
-    Move hashMove = (ttEntry && ttEntry->depth >= depth && ttEntry->flag == HASH_FLAG_EXACT) ? ttEntry->move : NO_MOVE;
-    Move shallowHashMove = (ttEntry && ttEntry->depth >= (depth - 2) && ttEntry->flag == HASH_FLAG_EXACT) ? ttEntry->move : NO_MOVE;
-    std::vector<Move> orderedMoves;
-    std::vector<Move> hashMoves;
-    std::vector<Move> capturesAndPromotions;
-    std::vector<Move> promotions;
-    std::vector<Move> goodCaptures;
-    std::vector<Move> equalCaptures;
-    std::vector<Move> killerMoves;
-    std::vector<Move> nonCaptures;
-    std::vector<Move> losingCaptures;
+std::vector<std::pair<Move, uint64_t>> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth) {
+    Move hashMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
+
+    std::vector<std::pair<Move, uint64_t>> allMoves;
 
     for (const Move& move : moves) {
-        // Assuming you have a function isIterativeDeepeningMove to check if the move is an iterative deepening move
+        uint64_t score = 0;
+        int captureStrength;
         if (move == hashMove) {
-            hashMoves.push_back(move);
-        }
-        else if (move == shallowHashMove) {
-            hashMoves.push_back(move);
+            allMoves.push_back({ move, board.maxHistoryValue + 100 });
         }
         else if (move.isCapture || move.promotion) {
-            capturesAndPromotions.push_back(move);
-        }
-        else if (move.promotion) {
-            promotions.push_back(move);
-        }
-        else if (isGoodCapture(move, board)) {
-            goodCaptures.push_back(move);
-        }
-        else if (isEqualCapture(move, board)) {
-            equalCaptures.push_back(move);
+            captureStrength = isGoodCapture(move, board);
+            score += captureStrength;
+            if (captureStrength < 0) {
+                allMoves.push_back({ move,  score });
+                continue;
+            }
+            else if (move.promotion) {
+                score += getPieceValue(move.promotion);
+            }
+            allMoves.push_back({ move,  score + board.maxHistoryValue + 1 });
         }
         else if (isKillerMove(move, board, depth)) {
-            killerMoves.push_back(move);
-        }
-        else if (!move.isCapture) {
-            nonCaptures.push_back(move);
+            allMoves.push_back({ move, board.maxHistoryValue });
         }
         else {
-            losingCaptures.push_back(move);
+            score = board.historyHeuristic[board.posToValue(move.from)][move.to]; // This should be between 0-maxHistoryValue
+            allMoves.push_back({ move, score });
         }
     }
 
-    // Append moves in the order of priority
-    orderedMoves.insert(orderedMoves.end(), hashMoves.begin(), hashMoves.end());
-    orderedMoves.insert(orderedMoves.end(), capturesAndPromotions.begin(), capturesAndPromotions.end());
-    orderedMoves.insert(orderedMoves.end(), promotions.begin(), promotions.end());
-    orderedMoves.insert(orderedMoves.end(), goodCaptures.begin(), goodCaptures.end());
-    orderedMoves.insert(orderedMoves.end(), equalCaptures.begin(), equalCaptures.end());
-    orderedMoves.insert(orderedMoves.end(), killerMoves.begin(), killerMoves.end());
-    orderedMoves.insert(orderedMoves.end(), nonCaptures.begin(), nonCaptures.end());
-    orderedMoves.insert(orderedMoves.end(), losingCaptures.begin(), losingCaptures.end());
+    // Sort non-captures based on history heuristic  
+    std::sort(allMoves.begin(), allMoves.end(), [](const std::pair<Move, uint64_t>& a, const std::pair<Move, uint64_t>& b) {
+        return a.second > b.second;
+        });
+    return allMoves;
+}
+
+std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth) {
+    Move hashMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
+
+    std::vector<std::pair<Move, uint64_t>> allMoves;
+
+    for (const Move& move : moves) {
+        uint64_t score = 0;
+        int captureStrength;
+        if (move == hashMove) {
+            allMoves.push_back({ move, board.maxHistoryValue + 100 });
+        }
+        else if (move.isCapture || move.promotion) {
+            captureStrength = isGoodCapture(move, board);
+            score += captureStrength;
+            if (captureStrength < 0) {
+                allMoves.push_back({ move,  score});
+                continue;
+            }
+            else if (move.promotion) {
+                score += getPieceValue(move.promotion);
+            }
+            allMoves.push_back({ move,  score + board.maxHistoryValue + 1 });
+        }
+        else if (isKillerMove(move, board, depth)) {
+            allMoves.push_back({ move, board.maxHistoryValue });
+        }
+        else {
+            score = board.historyHeuristic[board.posToValue(move.from)][move.to]; // This should be between 0-maxHistoryValue
+            allMoves.push_back({ move, score });
+        }
+    }
+
+    // Sort non-captures based on history heuristic  
+    std::sort(allMoves.begin(), allMoves.end(), [](const std::pair<Move, uint64_t>& a, const std::pair<Move, uint64_t>& b) {
+        return a.second > b.second;
+        });
+
+
+    // Combine all move categories into the final ordered list
+    std::vector<Move> orderedMoves;
+    for (const auto& pair : allMoves) orderedMoves.push_back(pair.first);
 
     return orderedMoves;
 }
 
 bool isTacticalPosition(std::vector<Move> moves, Board board) {
     for (const Move& move : moves) {
-        if (move.isCapture && (isGoodCapture(move, board) || isEqualCapture(move, board)) || move.promotion) {
+        if (isGoodCapture(move, board) || isEqualCapture(move, board) || move.promotion) {
             return true;
         }
     }
@@ -1279,7 +1326,6 @@ void Board::resize_tt(uint64_t mb) {
     clear_tt();  // Clear the table to ensure all entries are reset after resizing
 }
 
-// This function might be called from a GUI configuration dialog or command line option
 void Board::configureTranspositionTableSize(uint64_t sizeInMB) {
     resize_tt(sizeInMB);
 }
@@ -1324,23 +1370,11 @@ TT_Entry* Board::probeTranspositionTable(uint64_t hash) {
     return &transposition_table[hash % transposition_table.size()];
 }
 
+// Checking if it is a quiet position or not
 bool isNullViable(Board& board) {
-    if (board.whiteToMove) {
-        if ((std::_Popcount(board.whiteBishops) + std::_Popcount(board.whiteKnights) + (std::_Popcount(board.whiteRooks) * 2) + (std::_Popcount(board.whiteQueens) * 2)) >= 2) {
-            return true;
-        }
-        else {
-            return false;
-        }
-    }
-    else {
-        if ((std::_Popcount(board.blackBishops) + std::_Popcount(board.blackKnights) + (std::_Popcount(board.blackRooks) * 2) + (std::_Popcount(board.blackQueens) * 2)) >= 2) {
-            return true;
-        }
-        else {
-            return false;
-        }
-    }
+    return board.whiteToMove ? 
+    ((std::_Popcount(board.whiteBishops) + std::_Popcount(board.whiteKnights) + (std::_Popcount(board.whiteRooks) * 2) + (std::_Popcount(board.whiteQueens) * 2)) >= 2) : 
+    ((std::_Popcount(board.blackBishops) + std::_Popcount(board.blackKnights) + (std::_Popcount(board.blackRooks) * 2) + (std::_Popcount(board.blackQueens) * 2)) >= 2);
 }
 
 // Function to deserialize a Move object
@@ -1412,7 +1446,28 @@ size_t Board::countTranspositionTableEntries() const {
     }
     return count;
 }
+
+int clamp(int value, int max, int min) {
+    if (value > max) return max;
+    if (value < min) return min;
+    return value;
+}
+
+void Board::updateHistory(int from, int to, int bonus) {
+    int fromPos = posToValue(from);
+    historyHeuristic[fromPos][to] += bonus;
+    //Half the entire history if a value reaches max.
+    if (historyHeuristic[fromPos][to] >= maxHistoryValue) {
+        maxHistoryValue <<= 1; // Double the new max
+        for (int i = 0; i < 12; i++) {
+            for (int j = 0; j < 64; j++) {
+                historyHeuristic[i][j] >>= 1;
+            }
+        }
+    }
+}
 /**
+* Functions once used to convert book moves into my engines format
 Move parseMove(const std::string& moveStr, Board board) {
     // King side castle
     if (moveStr == "'O-O'") {

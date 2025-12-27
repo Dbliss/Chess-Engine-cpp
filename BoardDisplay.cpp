@@ -1,7 +1,6 @@
 #include "BoardDisplay.h"
 #include <iostream>
 
-
 bool isCaptureMove(Move legalMove) {
     if (legalMove.isCapture) {
         return true;
@@ -17,27 +16,27 @@ BoardDisplay::BoardDisplay() {
 }
 
 void BoardDisplay::loadTextures() {
-    if (!whitePawnTexture.loadFromFile("images/Chess_plt60.png") ||
-        !whiteKnightTexture.loadFromFile("images/Chess_nlt60.png") ||
-        !whiteBishopTexture.loadFromFile("images/Chess_blt60.png") ||
-        !whiteRookTexture.loadFromFile("images/Chess_rlt60.png") ||
-        !whiteQueenTexture.loadFromFile("images/Chess_qlt60.png") ||
-        !whiteKingTexture.loadFromFile("images/Chess_klt60.png") ||
-        !blackPawnTexture.loadFromFile("images/Chess_pdt60.png") ||
-        !blackKnightTexture.loadFromFile("images/Chess_ndt60.png") ||
-        !blackBishopTexture.loadFromFile("images/Chess_bdt60.png") ||
-        !blackRookTexture.loadFromFile("images/Chess_rdt60.png") ||
-        !blackQueenTexture.loadFromFile("images/Chess_qdt60.png") ||
-        !blackKingTexture.loadFromFile("images/Chess_kdt60.png")) {
+    if (!whitePawnTexture.loadFromFile("Images/Chess_plt60.png") ||
+        !whiteKnightTexture.loadFromFile("Images/Chess_nlt60.png") ||
+        !whiteBishopTexture.loadFromFile("Images/Chess_blt60.png") ||
+        !whiteRookTexture.loadFromFile("Images/Chess_rlt60.png") ||
+        !whiteQueenTexture.loadFromFile("Images/Chess_qlt60.png") ||
+        !whiteKingTexture.loadFromFile("Images/Chess_klt60.png") ||
+        !blackPawnTexture.loadFromFile("Images/Chess_pdt60.png") ||
+        !blackKnightTexture.loadFromFile("Images/Chess_ndt60.png") ||
+        !blackBishopTexture.loadFromFile("Images/Chess_bdt60.png") ||
+        !blackRookTexture.loadFromFile("Images/Chess_rdt60.png") ||
+        !blackQueenTexture.loadFromFile("Images/Chess_qdt60.png") ||
+        !blackKingTexture.loadFromFile("Images/Chess_kdt60.png")) {
         std::cerr << "Error loading piece textures" << std::endl;
     }
 }
 
 void BoardDisplay::loadSounds() {
-    if (!moveBuffer.loadFromFile("recordings/bonk.wav") ||
-        !checkBuffer.loadFromFile("recordings/check.wav") ||
-        !checkmateBuffer.loadFromFile("recordings/checkmate.wav") ||
-        !captureBuffer.loadFromFile("recordings/capture.wav")) {
+    if (!moveBuffer.loadFromFile("Recordings/move-self.wav") ||
+        !checkBuffer.loadFromFile("Recordings/move-check.wav") ||
+        !checkmateBuffer.loadFromFile("Recordings/move-check.wav") ||
+        !captureBuffer.loadFromFile("Recordings/capture1.wav")) {
         std::cerr << "Error loading sound files" << std::endl;
     }
     moveSound.setBuffer(moveBuffer);
@@ -48,11 +47,14 @@ void BoardDisplay::loadSounds() {
 
 void BoardDisplay::setupPieces(Board& board) {
     pieces.clear();
+    const float scaleFactor = tileSize / 60.0f; // Assuming original size is 60x60
+
     for (int i = 0; i < 64; ++i) {
         int x = 7 - (i % 8); // Reverse the columns
         int y = i / 8;       // Keep the rows as is
         sf::Sprite sprite;
         char piece = board.getPieceAt(i); // Assuming you have a method to get piece at a square
+
         switch (piece) {
         case 'p': sprite.setTexture(whitePawnTexture); break;
         case 'n': sprite.setTexture(whiteKnightTexture); break;
@@ -68,45 +70,48 @@ void BoardDisplay::setupPieces(Board& board) {
         case 'K': sprite.setTexture(blackKingTexture); break;
         default: continue;
         }
+
+        // Set the scale to 100x100 pixels
+        sprite.setScale(scaleFactor, scaleFactor);
+
         sprite.setPosition(x * tileSize, (7 - y) * tileSize); // Adjust for bottom-to-top indexing
         pieces.push_back(sprite);
+    }
 
-        bool isCapture = isCaptureMove(board.lastMove);
-        bool isCheck = false;
-        bool isCheckmate = false;
+    bool isCapture = isCaptureMove(board.lastMove);
+    bool isCheck = false;
+    bool isCheckmate = false;
 
-        if (board.amIInCheck(board.whiteToMove)) {
-            std::vector<Move> moves2 = board.generateAllMoves();
-            if (size(moves2) == 0) {
-                isCheckmate = true;
-            }
-            else {
-                isCheck = true;
-            }
-        }
-
-        // Play the corresponding sound
-        if (isCheckmate) {
-            checkmateSound.play();
-        }
-        else if (isCheck) {
-            checkSound.play();
-        }
-        else if (isCapture) {
-            captureSound.play();
+    if (board.amIInCheck(board.whiteToMove)) {
+        std::vector<Move> moves2 = board.generateAllMoves();
+        if (size(moves2) == 0) {
+            isCheckmate = true;
         }
         else {
-            moveSound.play();
+            isCheck = true;
         }
-        
+    }
+
+    // Play the corresponding sound
+    if (isCheckmate) {
+        checkmateSound.play();
+    }
+    else if (isCheck) {
+        checkSound.play();
+    }
+    else if (isCapture) {
+        captureSound.play();
+    }
+    else {
+        moveSound.play();
     }
 }
-
 void BoardDisplay::updatePieces(sf::RenderWindow& window, Board& board) {
     setupPieces(board);  // Sets up the pieces based on the current board state
 
     draw(window, board);  // Call the overloaded draw function to immediately reflect changes
 }
+
 void BoardDisplay::draw(sf::RenderWindow& window) {
     // Draw checkered background
     for (int y = 0; y < 8; ++y) {
