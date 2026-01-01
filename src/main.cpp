@@ -3,19 +3,20 @@
 #include "chess.h"
 #include <thread>
 #include "zobrist.h"
+#include <bit>
 
 bool isDrawByMaterial(Board board) {
-    int numWhitePawns = std::_Popcount(board.whitePawns);
-    int numWhiteBishops = std::_Popcount(board.whiteBishops);
-    int numWhiteKnights = std::_Popcount(board.whiteKnights);
-    int numWhiteRooks = std::_Popcount(board.whiteRooks);
-    int numWhiteQueens = std::_Popcount(board.whiteQueens);
+    int numWhitePawns = std::popcount(board.whitePawns);
+    int numWhiteBishops = std::popcount(board.whiteBishops);
+    int numWhiteKnights = std::popcount(board.whiteKnights);
+    int numWhiteRooks = std::popcount(board.whiteRooks);
+    int numWhiteQueens = std::popcount(board.whiteQueens);
 
-    int numBlackPawns = std::_Popcount(board.blackPawns);
-    int numBlackBishops = std::_Popcount(board.blackBishops);
-    int numBlackKnights = std::_Popcount(board.blackKnights);
-    int numBlackRooks = std::_Popcount(board.blackRooks);
-    int numBlackQueens = std::_Popcount(board.blackQueens);
+    int numBlackPawns = std::popcount(board.blackPawns);
+    int numBlackBishops = std::popcount(board.blackBishops);
+    int numBlackKnights = std::popcount(board.blackKnights);
+    int numBlackRooks = std::popcount(board.blackRooks);
+    int numBlackQueens = std::popcount(board.blackQueens);
 
     // Encourage draws if both sides have no pawns or major pieces left and only up to one minor piece each.
     if (!numWhitePawns && !numBlackPawns &&
@@ -128,7 +129,7 @@ void playAgainstComputer() {
         return;
     }
 
-    sf::Text startButton("Start Game", font, 20);
+    sf::Text startButton(font,"Start Game", font, 20);
     startButton.setPosition(static_cast<float>(display.tileSize * 8 + 10), 10);
     sf::RectangleShape startButtonBox(sf::Vector2f(275, 40)); // 10% wider
     startButtonBox.setPosition(static_cast<float>(display.tileSize * 8 + 5), 5);
