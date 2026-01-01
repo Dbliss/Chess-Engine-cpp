@@ -62,34 +62,33 @@ void playAgainstComputer();
 
 void displayEndGameMessage(sf::RenderWindow& window, const std::string& message) {
     sf::Font font;
-    if (!font.loadFromFile("sansation.ttf")) {
+    if (!font.openFromFile("sansation.ttf")) {
         std::cerr << "Error loading font" << std::endl;
         return;
     }
 
-    sf::Text endMessage(message, font, 50);
+    sf::Text endMessage(font, message, 50);
     endMessage.setFillColor(sf::Color::Red);
     endMessage.setStyle(sf::Text::Bold);
-    endMessage.setPosition(window.getSize().x / 2.0f - endMessage.getGlobalBounds().width / 2.0f, window.getSize().y / 3.0f);
+    endMessage.setPosition({window.getSize().x / 2.0f - endMessage.getGlobalBounds().size.x / 2.0f, window.getSize().y / 3.0f});
 
-    sf::Text playAgainButton("Want to play again?", font, 30);
+    sf::Text playAgainButton(font, "Want to play again?", 30);
     playAgainButton.setFillColor(sf::Color::Green);
     playAgainButton.setStyle(sf::Text::Bold);
-    playAgainButton.setPosition(window.getSize().x / 2.0f - playAgainButton.getGlobalBounds().width / 2.0f, window.getSize().y / 2.0f);
+    playAgainButton.setPosition({window.getSize().x / 2.0f - playAgainButton.getGlobalBounds().size.x / 2.0f, window.getSize().y / 2.0f});
 
-    sf::RectangleShape playAgainButtonBox(sf::Vector2f(playAgainButton.getGlobalBounds().width + 20, playAgainButton.getGlobalBounds().height + 10));
-    playAgainButtonBox.setPosition(playAgainButton.getPosition().x - 10, playAgainButton.getPosition().y - 5);
+    sf::RectangleShape playAgainButtonBox(sf::Vector2f(playAgainButton.getGlobalBounds().size.x + 20, playAgainButton.getGlobalBounds().size.y + 10));
+    playAgainButtonBox.setPosition({playAgainButton.getPosition().x - 10, playAgainButton.getPosition().y - 5});
     playAgainButtonBox.setFillColor(sf::Color::Transparent);
     playAgainButtonBox.setOutlineThickness(2);
     playAgainButtonBox.setOutlineColor(sf::Color::Green);
 
     while (window.isOpen()) {
-        sf::Event event;
-        while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed)
+        while (auto event = window.pollEvent()) {
+            if (event->is<sf::Event::Closed>())
                 window.close();
 
-            if (event.type == sf::Event::MouseButtonPressed) {
+            if (event->is<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2f mousePos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
                 if (playAgainButtonBox.getGlobalBounds().contains(mousePos)) {
                     playAgainstComputer();
@@ -120,11 +119,11 @@ void playAgainstComputer() {
     BoardDisplay display;
     display.setupPieces(board);
 
-    sf::RenderWindow window(sf::VideoMode(display.tileSize * 8 + 330, display.tileSize * 8), "Chess Board");
+    sf::RenderWindow window(sf::VideoMode({static_cast<unsigned int>(display.tileSize * 8 + 330), static_cast<unsigned int>(display.tileSize * 8)}), "Chess Board");
 
     // Create UI elements
     sf::Font font;
-    if (!font.loadFromFile("sansation.ttf")) {
+    if (!font.openFromFile("sansation.ttf")) {
         std::cerr << "Error loading font" << std::endl;
         return;
     }
@@ -132,55 +131,54 @@ void playAgainstComputer() {
     sf::Text startButton(font,"Start Game", font, 20);
     startButton.setPosition(static_cast<float>(display.tileSize * 8 + 10), 10);
     sf::RectangleShape startButtonBox(sf::Vector2f(275, 40)); // 10% wider
-    startButtonBox.setPosition(static_cast<float>(display.tileSize * 8 + 5), 5);
+    startButtonBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 5});
     startButtonBox.setFillColor(sf::Color::Transparent);
     startButtonBox.setOutlineThickness(2);
     startButtonBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text playerColorLabel("Player Color (White/Black):", font, 20);
-    playerColorLabel.setPosition(static_cast<float>(display.tileSize * 8 + 10), 70);
+    sf::Text playerColorLabel(font, "Player Color (White/Black):", 20);
+    playerColorLabel.setPosition({static_cast<float>(display.tileSize * 8 + 10), 70});
     sf::RectangleShape playerColorBox(sf::Vector2f(275, 40)); // 10% wider
-    playerColorBox.setPosition(static_cast<float>(display.tileSize * 8 + 5), 65);
+    playerColorBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 65});
     playerColorBox.setFillColor(sf::Color::Transparent);
     playerColorBox.setOutlineThickness(2);
     playerColorBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text timeLimitLabel("Computer Thinking Time (ms):", font, 20);
-    timeLimitLabel.setPosition(static_cast<float>(display.tileSize * 8 + 10), 150);
+    sf::Text timeLimitLabel(font, "Computer Thinking Time (ms):", 20);
+    timeLimitLabel.setPosition({static_cast<float>(display.tileSize * 8 + 10), 150});
     sf::RectangleShape timeLimitBox(sf::Vector2f(275, 40)); // 10% wider
-    timeLimitBox.setPosition(static_cast<float>(display.tileSize * 8 + 5), 145);
+    timeLimitBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 145});
     timeLimitBox.setFillColor(sf::Color::Transparent);
     timeLimitBox.setOutlineThickness(2);
     timeLimitBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text ponderingLabel("Allow Pondering (Yes/No):", font, 20);
-    ponderingLabel.setPosition(static_cast<float>(display.tileSize * 8 + 10), 230);
+    sf::Text ponderingLabel(font, "Allow Pondering (Yes/No):", 20);
+    ponderingLabel.setPosition({static_cast<float>(display.tileSize * 8 + 10), 230});
     sf::RectangleShape ponderingBox(sf::Vector2f(275, 40)); // 10% wider
-    ponderingBox.setPosition(static_cast<float>(display.tileSize * 8 + 5), 225);
+    ponderingBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 225});
     ponderingBox.setFillColor(sf::Color::Transparent);
     ponderingBox.setOutlineThickness(2);
     ponderingBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text playerColorText(playerColor == 'w' ? "White" : "Black", font, 20);
-    playerColorText.setPosition(static_cast<float>(display.tileSize * 8 + 10), 110);
+    sf::Text playerColorText(font, playerColor == 'w' ? "White" : "Black", 20);
+    playerColorText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 110});
 
-    sf::Text timeLimitText(std::to_string(timeLimit), font, 20);
-    timeLimitText.setPosition(static_cast<float>(display.tileSize * 8 + 10), 190);
+    sf::Text timeLimitText(font, std::to_string(timeLimit), 20);
+    timeLimitText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 190});
 
-    sf::Text ponderingText(ponderingOn ? "Yes" : "No", font, 20);
-    ponderingText.setPosition(static_cast<float>(display.tileSize * 8 + 10), 270);
+    sf::Text ponderingText(font, ponderingOn ? "Yes" : "No", 20);
+    ponderingText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 270});
 
     Board dupBoard = board;
     std::thread ponderingThread;
     bool isPlayerTurn = (playerColor == 'w');
 
     while (window.isOpen()) {
-        sf::Event event;
-        while (window.pollEvent(event)) {
-            if (event.type == sf::Event::Closed)
+        while (auto event = window.pollEvent()) {
+            if (event->is<sf::Event::Closed>())
                 window.close();
 
-            if (event.type == sf::Event::MouseButtonPressed) {
+            if (event->is<sf::Event::MouseButtonPressed>()) {
                 sf::Vector2f mousePos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
 
                 if (startButtonBox.getGlobalBounds().contains(mousePos)) {
@@ -196,7 +194,7 @@ void playAgainstComputer() {
                 }
 
                 if (timeLimitBox.getGlobalBounds().contains(mousePos)) {
-                    if (mousePos.x < timeLimitLabel.getPosition().x + timeLimitLabel.getGlobalBounds().width / 2) {
+                    if (mousePos.x < timeLimitLabel.getPosition().x + timeLimitLabel.getGlobalBounds().size.x / 2) {
                         if (timeLimit > 1000) {
                             timeLimit -= 1000;
                         }
@@ -238,8 +236,8 @@ void playAgainstComputer() {
         if (startGame) {
             std::string endGameMessage;
             while (window.isOpen()) {
-                while (window.pollEvent(event)) {
-                    if (event.type == sf::Event::Closed)
+                while (auto innerEvent = window.pollEvent()) {
+                    if (innerEvent->is<sf::Event::Closed>())
                         window.close();
                 }
 

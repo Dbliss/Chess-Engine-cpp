@@ -52,29 +52,30 @@ void BoardDisplay::setupPieces(Board& board) {
     for (int i = 0; i < 64; ++i) {
         int x = 7 - (i % 8); // Reverse the columns
         int y = i / 8;       // Keep the rows as is
-        sf::Sprite sprite;
+        const sf::Texture* texture = nullptr;
         char piece = board.getPieceAt(i); // Assuming you have a method to get piece at a square
 
         switch (piece) {
-        case 'p': sprite.setTexture(whitePawnTexture); break;
-        case 'n': sprite.setTexture(whiteKnightTexture); break;
-        case 'b': sprite.setTexture(whiteBishopTexture); break;
-        case 'r': sprite.setTexture(whiteRookTexture); break;
-        case 'q': sprite.setTexture(whiteQueenTexture); break;
-        case 'k': sprite.setTexture(whiteKingTexture); break;
-        case 'P': sprite.setTexture(blackPawnTexture); break;
-        case 'N': sprite.setTexture(blackKnightTexture); break;
-        case 'B': sprite.setTexture(blackBishopTexture); break;
-        case 'R': sprite.setTexture(blackRookTexture); break;
-        case 'Q': sprite.setTexture(blackQueenTexture); break;
-        case 'K': sprite.setTexture(blackKingTexture); break;
+        case 'p': texture = &whitePawnTexture; break;
+        case 'n': texture = &whiteKnightTexture; break;
+        case 'b': texture = &whiteBishopTexture; break;
+        case 'r': texture = &whiteRookTexture; break;
+        case 'q': texture = &whiteQueenTexture; break;
+        case 'k': texture = &whiteKingTexture; break;
+        case 'P': texture = &blackPawnTexture; break;
+        case 'N': texture = &blackKnightTexture; break;
+        case 'B': texture = &blackBishopTexture; break;
+        case 'R': texture = &blackRookTexture; break;
+        case 'Q': texture = &blackQueenTexture; break;
+        case 'K': texture = &blackKingTexture; break;
         default: continue;
         }
 
         // Set the scale to 100x100 pixels
-        sprite.setScale(scaleFactor, scaleFactor);
+        sf::Sprite sprite(*texture);
+        sprite.setScale({scaleFactor, scaleFactor});
 
-        sprite.setPosition(x * tileSize, (7 - y) * tileSize); // Adjust for bottom-to-top indexing
+        sprite.setPosition({static_cast<float>(x * tileSize), static_cast<float>((7 - y) * tileSize)}); // Adjust for bottom-to-top indexing
         pieces.push_back(sprite);
     }
 
@@ -117,7 +118,7 @@ void BoardDisplay::draw(sf::RenderWindow& window) {
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 8; ++x) {
             sf::RectangleShape square(sf::Vector2f(tileSize, tileSize));
-            square.setPosition(x * tileSize, y * tileSize);
+            square.setPosition({static_cast<float>(x * tileSize), static_cast<float>(y * tileSize)});
             if ((x + y) % 2 == 0) {
                 square.setFillColor(lightColor);
             }
@@ -139,7 +140,7 @@ void BoardDisplay::draw(sf::RenderWindow& window, Board& board) {
     for (int y = 0; y < 8; ++y) {
         for (int x = 0; x < 8; ++x) {
             sf::RectangleShape square(sf::Vector2f(tileSize, tileSize));
-            square.setPosition(x * tileSize, y * tileSize);
+            square.setPosition({static_cast<float>(x * tileSize), static_cast<float>(y * tileSize)});
             if (board.lastMove.from == (8*(8-y) + (8-x))) {
                 square.setFillColor(lastMoveColor);
             }
@@ -163,7 +164,7 @@ bool BoardDisplay::handleMove(sf::RenderWindow& window, Board& board) {
     static sf::Vector2i firstClick(-1, -1);
     static sf::Vector2i secondClick(-1, -1);
 
-    if (sf::Mouse::isButtonPressed(sf::Mouse::Left)) {
+    if (sf::Mouse::isButtonPressed(sf::Mouse::Button::Left)) {
         sf::Vector2i click = sf::Mouse::getPosition(window);
         int x = click.x / tileSize;
         int y = click.y / tileSize;
