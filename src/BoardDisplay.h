@@ -40,10 +40,10 @@ private:
     sf::SoundBuffer checkmateBuffer;
     sf::SoundBuffer captureBuffer;
 
-    sf::Sound moveSound;
-    sf::Sound checkSound;
-    sf::Sound checkmateSound;
-    sf::Sound captureSound;
+    sf::Sound moveSound{moveBuffer};
+    sf::Sound checkSound{checkBuffer};
+    sf::Sound checkmateSound{checkmateBuffer};
+    sf::Sound captureSound{captureBuffer};
 };
 
 #endif
