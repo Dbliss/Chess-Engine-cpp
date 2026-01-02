@@ -79,13 +79,8 @@ const int64_t king_endgame_pcsq[64] = {
     -40, -30, -20, -10, -10, -20, -30, -40
 };
 
-unsigned int ctzll3(unsigned long long x) {
-    unsigned long index; // Variable to store the result
-    // _BitScanForward64 returns 0 if x is zero, so handle this case:
-    if (_BitScanForward64(&index, x))
-        return index;
-    else
-        return 64; // Define behavior for x == 0
+unsigned int ctzll3(std::uint64_t x) {
+    return x ? (unsigned)std::countr_zero(x) : 64u;
 }
 
 int kingDistance2(uint64_t king1, uint64_t king2) {
@@ -99,18 +94,6 @@ int kingDistance2(uint64_t king1, uint64_t king2) {
 
     return std::max(std::abs(x1 - x2), std::abs(y1 - y2));
 }
-
-// Incentives for pieces moving towards the enemy king
-auto addIncentiveForPiece = [&](uint64_t pieces, uint64_t enemyKing, const int incentiveArray[]) {
-    double_t incentive = 0;
-    while (pieces) {
-        uint64_t piece = pieces & (~pieces + 1);
-        int distance = kingDistance2(piece, enemyKing);
-        incentive += incentiveArray[distance];
-        pieces &= ~piece;  // Clear the least significant bit set
-    }
-    return incentive;
-};
 
 bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights, int numBlackBishops) {
     int totalWhite = numWhiteKnights + numWhiteBishops;
@@ -128,7 +111,7 @@ double_t evaluate2(Board& board);
 
 double_t evaluate2(Board& board) {
     // Check for draw condition based on insufficient material
-    if ((std::_Popcount(board.whitePieces) == 1) && (std::_Popcount(board.blackPieces) == 1)) {
+    if ((std::popcount(board.whitePieces) == 1) && (std::popcount(board.blackPieces) == 1)) {
         return 0; // Return 0 to indicate a draw
     }
     double_t result = 0;
@@ -139,17 +122,17 @@ double_t evaluate2(Board& board) {
     const double_t rookValue = 500;
     const double_t queenValue = 975;
 
-    int numWhitePawns = std::_Popcount(board.whitePawns);
-    int numWhiteBishops = std::_Popcount(board.whiteBishops);
-    int numWhiteKnights = std::_Popcount(board.whiteKnights);
-    int numWhiteRooks = std::_Popcount(board.whiteRooks);
-    int numWhiteQueens = std::_Popcount(board.whiteQueens);
+    int numWhitePawns = std::popcount(board.whitePawns);
+    int numWhiteBishops = std::popcount(board.whiteBishops);
+    int numWhiteKnights = std::popcount(board.whiteKnights);
+    int numWhiteRooks = std::popcount(board.whiteRooks);
+    int numWhiteQueens = std::popcount(board.whiteQueens);
 
-    int numBlackPawns = std::_Popcount(board.blackPawns);
-    int numBlackBishops = std::_Popcount(board.blackBishops);
-    int numBlackKnights = std::_Popcount(board.blackKnights);
-    int numBlackRooks = std::_Popcount(board.blackRooks);
-    int numBlackQueens = std::_Popcount(board.blackQueens);
+    int numBlackPawns = std::popcount(board.blackPawns);
+    int numBlackBishops = std::popcount(board.blackBishops);
+    int numBlackKnights = std::popcount(board.blackKnights);
+    int numBlackRooks = std::popcount(board.blackRooks);
+    int numBlackQueens = std::popcount(board.blackQueens);
 
     // Encourage draws if both sides have no pawns or major pieces left and only up to one minor piece each.
     if (!numWhitePawns && !numBlackPawns &&
@@ -269,7 +252,7 @@ double_t evaluate2(Board& board) {
             Bitboard shieldPawns = (kingNorth | kingNorthEast | kingNorthWest | kingEast | kingWest) & pawns;
 
             // Count the number of pawns directly shielding the king
-            int pawnDefenders = std::_Popcount(shieldPawns);
+            int pawnDefenders = std::popcount(shieldPawns);
             return pawnDefenders;
         };
 
@@ -308,8 +291,8 @@ double_t evaluate2(Board& board) {
             Bitboard blackRankPawns = board.blackPawns & rankMasks[7 - rank] & blackKingFileMask;
 
             // Reward pawn progress
-            result += pawnStormBonus[rank] * std::_Popcount(whiteRankPawns);
-            result -= pawnStormBonus[rank] * std::_Popcount(blackRankPawns);
+            result += pawnStormBonus[rank] * std::popcount(whiteRankPawns);
+            result -= pawnStormBonus[rank] * std::popcount(blackRankPawns);
         }
 
         // estimate how safe king is by how many queen moves
@@ -347,8 +330,8 @@ double_t evaluate2(Board& board) {
 
     // Penalize double pawns
     for (int file = 0; file < 8; ++file) {
-        int whitePawnCount = std::_Popcount(board.whitePawns & fileMasks[file]);
-        int blackPawnCount = std::_Popcount(board.blackPawns & fileMasks[file]);
+        int whitePawnCount = std::popcount(board.whitePawns & fileMasks[file]);
+        int blackPawnCount = std::popcount(board.blackPawns & fileMasks[file]);
         if (whitePawnCount > 1) result -= 20 * (whitePawnCount - 1);
         if (blackPawnCount > 1) result += 20 * (blackPawnCount - 1);
     }
@@ -360,8 +343,8 @@ double_t evaluate2(Board& board) {
             Bitboard blackRankPawns = board.blackPawns & rankMasks[7 - rank];
 
             // Reward pawn progress
-            lateGamePawnPos += pawnProgressBonus[rank] * std::_Popcount(whiteRankPawns);
-            lateGamePawnPos -= pawnProgressBonus[rank] * std::_Popcount(blackRankPawns);
+            lateGamePawnPos += pawnProgressBonus[rank] * std::popcount(whiteRankPawns);
+            lateGamePawnPos -= pawnProgressBonus[rank] * std::popcount(blackRankPawns);
 
             // Check for passed pawns
             for (int file = 0; file < 8; ++file) {
@@ -395,12 +378,12 @@ double_t evaluate2(Board& board) {
     Bitboard leftDefendedPawns = (board.whitePawns & ~fileMasks[7]) << 9;
     Bitboard rightDefendedPawns = (board.whitePawns & ~fileMasks[0]) << 7;
     Bitboard defendedPawns = leftDefendedPawns | rightDefendedPawns;
-    result += 15 * std::_Popcount(defendedPawns & board.whitePawns);
+    result += 15 * std::popcount(defendedPawns & board.whitePawns);
 
     leftDefendedPawns = (board.blackPawns & ~fileMasks[7]) >> 7;
     rightDefendedPawns = (board.blackPawns & ~fileMasks[0]) >> 9;
     defendedPawns = leftDefendedPawns | rightDefendedPawns;
-    result -= 15 * std::_Popcount(defendedPawns & board.blackPawns);
+    result -= 15 * std::popcount(defendedPawns & board.blackPawns);
 
 
     // Add incentives for piece mobility
@@ -412,46 +395,6 @@ double_t evaluate2(Board& board) {
 
     result += 6 * board.generateQueenMoves(board.whiteQueens, board.whitePieces, board.blackPieces).size();
     result -= 6 * board.generateQueenMoves(board.blackQueens, board.blackPieces, board.whitePieces).size();
-
-   
-    /**
-    // Define incentive arrays for each piece type (example values)
-    int pawnIncentive[9] = { 0, 14, 12, 10, 8, 6, 4, 2, 0 };
-    int knightIncentive[9] = { 0, 5, 25, 15, 5, 0, 0, 0, 0 };
-    int bishopIncentive[9] = { 0, 21, 18, 15, 12, 9, 6, 3, 0 };
-    int rookIncentive[9] = { 0, 28, 24, 20, 16, 12, 8, 4, 0 };
-    int queenIncentive[9] = { 0, 35, 30, 25, 20, 15, 10, 5, 0 };
-    int defendersMultiplier[6] = { 2, 1.5, 1, 1, 0.5, 0 };
-    
-    if (gamePhase <= 0.6) {
-        //consider how many defenders early game
-        //result += addIncentiveForPiece(board.whitePawns, board.blackKing, pawnIncentive);
-        //result += addIncentiveForPiece(board.whiteKnights, board.blackKing, knightIncentive) * defendersMultiplier[blackPawnDefenders];
-        //result += addIncentiveForPiece(board.whiteBishops, board.blackKing, bishopIncentive) * defendersMultiplier[blackPawnDefenders];
-        //result += addIncentiveForPiece(board.whiteRooks, board.blackKing, rookIncentive) * defendersMultiplier[blackPawnDefenders];
-        //result += addIncentiveForPiece(board.whiteQueens, board.blackKing, queenIncentive) * defendersMultiplier[blackPawnDefenders];
-
-        //result -= addIncentiveForPiece(board.blackPawns, board.whiteKing, pawnIncentive);
-        //result -= addIncentiveForPiece(board.blackKnights, board.whiteKing, knightIncentive) * defendersMultiplier[whitePawnDefenders];
-        //result -= addIncentiveForPiece(board.blackBishops, board.whiteKing, bishopIncentive) * defendersMultiplier[whitePawnDefenders];
-        //result -= addIncentiveForPiece(board.blackRooks, board.whiteKing, rookIncentive) * defendersMultiplier[whitePawnDefenders];
-        //result -= addIncentiveForPiece(board.blackQueens, board.whiteKing, queenIncentive) * defendersMultiplier[whitePawnDefenders];
-    }
-    
-    else {
-        //result += addIncentiveForPiece(board.whitePawns, board.blackKing, pawnIncentive);
-        //result += addIncentiveForPiece(board.whiteKnights, board.blackKing, knightIncentive);
-        //result += addIncentiveForPiece(board.whiteBishops, board.blackKing, bishopIncentive);
-        //result += addIncentiveForPiece(board.whiteRooks, board.blackKing, rookIncentive);
-        //result += addIncentiveForPiece(board.whiteQueens, board.blackKing, queenIncentive);
-
-        //result -= addIncentiveForPiece(board.blackPawns, board.whiteKing, pawnIncentive);
-        //result -= addIncentiveForPiece(board.blackKnights, board.whiteKing, knightIncentive);
-        //result -= addIncentiveForPiece(board.blackBishops, board.whiteKing, bishopIncentive);
-        //result -= addIncentiveForPiece(board.blackRooks, board.whiteKing, rookIncentive);
-        //result -= addIncentiveForPiece(board.blackQueens, board.whiteKing, queenIncentive);
-    }
-    */
 
     // Lead is expanded as game goes on, incentives trading
     if ((gamePhase > 0.6) && (std::abs(result) > 400)) {

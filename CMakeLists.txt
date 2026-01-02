@@ -8,7 +8,6 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Your executable
 add_executable(ChessEngine
     src/main.cpp
     src/chess.cpp
@@ -18,11 +17,11 @@ add_executable(ChessEngine
     src/zobrist.cpp
 )
 
-# SFML via vcpkg
-find_package(SFML CONFIG REQUIRED COMPONENTS Graphics Window System)
+find_package(SFML CONFIG REQUIRED COMPONENTS Graphics Window System Audio)
 
 target_link_libraries(ChessEngine PRIVATE
     SFML::Graphics
     SFML::Window
     SFML::System
+    SFML::Audio
 )

@@ -1373,8 +1373,8 @@ TT_Entry* Board::probeTranspositionTable(uint64_t hash) {
 // Checking if it is a quiet position or not
 bool isNullViable(Board& board) {
     return board.whiteToMove ? 
-    ((std::_Popcount(board.whiteBishops) + std::_Popcount(board.whiteKnights) + (std::_Popcount(board.whiteRooks) * 2) + (std::_Popcount(board.whiteQueens) * 2)) >= 2) : 
-    ((std::_Popcount(board.blackBishops) + std::_Popcount(board.blackKnights) + (std::_Popcount(board.blackRooks) * 2) + (std::_Popcount(board.blackQueens) * 2)) >= 2);
+    ((std::popcount(board.whiteBishops) + std::popcount(board.whiteKnights) + (std::popcount(board.whiteRooks) * 2) + (std::popcount(board.whiteQueens) * 2)) >= 2) : 
+    ((std::popcount(board.blackBishops) + std::popcount(board.blackKnights) + (std::popcount(board.blackRooks) * 2) + (std::popcount(board.blackQueens) * 2)) >= 2);
 }
 
 // Function to deserialize a Move object

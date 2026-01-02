@@ -67,12 +67,12 @@ void displayEndGameMessage(sf::RenderWindow& window, const std::string& message)
         return;
     }
 
-    sf::Text endMessage(message, font, 50);
+    sf::Text endMessage(font, message, 50);
     endMessage.setFillColor(sf::Color::Red);
     endMessage.setStyle(sf::Text::Bold);
     endMessage.setPosition({window.getSize().x / 2.0f - endMessage.getGlobalBounds().size.x / 2.0f, window.getSize().y / 3.0f});
 
-    sf::Text playAgainButton("Want to play again?", font, 30);
+    sf::Text playAgainButton(font, "Want to play again?", 30);
     playAgainButton.setFillColor(sf::Color::Green);
     playAgainButton.setStyle(sf::Text::Bold);
     playAgainButton.setPosition({window.getSize().x / 2.0f - playAgainButton.getGlobalBounds().size.x / 2.0f, window.getSize().y / 2.0f});
@@ -128,7 +128,7 @@ void playAgainstComputer() {
         return;
     }
 
-    sf::Text startButton("Start Game", font, 20);
+    sf::Text startButton(font, "Start Game", 20);
     startButton.setPosition({static_cast<float>(display.tileSize * 8 + 10), 10});
     sf::RectangleShape startButtonBox(sf::Vector2f(275, 40)); // 10% wider
     startButtonBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 5});
@@ -136,7 +136,7 @@ void playAgainstComputer() {
     startButtonBox.setOutlineThickness(2);
     startButtonBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text playerColorLabel("Player Color (White/Black):", font, 20);
+    sf::Text playerColorLabel(font, "Player Color (White/Black):", 20);
     playerColorLabel.setPosition({static_cast<float>(display.tileSize * 8 + 10), 70});
     sf::RectangleShape playerColorBox(sf::Vector2f(275, 40)); // 10% wider
     playerColorBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 65});
@@ -144,7 +144,7 @@ void playAgainstComputer() {
     playerColorBox.setOutlineThickness(2);
     playerColorBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text timeLimitLabel("Computer Thinking Time (ms):", font, 20);
+    sf::Text timeLimitLabel(font, "Computer Thinking Time (ms):", 20);
     timeLimitLabel.setPosition({static_cast<float>(display.tileSize * 8 + 10), 150});
     sf::RectangleShape timeLimitBox(sf::Vector2f(275, 40)); // 10% wider
     timeLimitBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 145});
@@ -152,7 +152,7 @@ void playAgainstComputer() {
     timeLimitBox.setOutlineThickness(2);
     timeLimitBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text ponderingLabel("Allow Pondering (Yes/No):", font, 20);
+    sf::Text ponderingLabel(font, "Allow Pondering (Yes/No):", 20);
     ponderingLabel.setPosition({static_cast<float>(display.tileSize * 8 + 10), 230});
     sf::RectangleShape ponderingBox(sf::Vector2f(275, 40)); // 10% wider
     ponderingBox.setPosition({static_cast<float>(display.tileSize * 8 + 5), 225});
@@ -160,13 +160,13 @@ void playAgainstComputer() {
     ponderingBox.setOutlineThickness(2);
     ponderingBox.setOutlineColor(sf::Color::Green);
 
-    sf::Text playerColorText(playerColor == 'w' ? "White" : "Black", font, 20);
+    sf::Text playerColorText(font, playerColor == 'w' ? "White" : "Black", 20);
     playerColorText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 110});
 
-    sf::Text timeLimitText(std::to_string(timeLimit), font, 20);
+    sf::Text timeLimitText(font, std::to_string(timeLimit), 20);
     timeLimitText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 190});
 
-    sf::Text ponderingText(ponderingOn ? "Yes" : "No", font, 20);
+    sf::Text ponderingText(font, ponderingOn ? "Yes" : "No", 20);
     ponderingText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 270});
 
     Board dupBoard = board;
