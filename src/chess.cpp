@@ -6,7 +6,15 @@
 #include <chrono>
 #include "zobrist.h"
 
+#include <algorithm>
+#include <fstream>
+#include <cmath>
+#include <bit>
+
 const Move NO_MOVE;
+
+constexpr Bitboard NOT_A_FILE = 0x7F7F7F7F7F7F7F7FULL;
+constexpr Bitboard NOT_H_FILE = 0xFEFEFEFEFEFEFEFEULL;
 
 std::string numToBoardPosition(int num) {
     // Ensure the number is within valid range
@@ -42,26 +50,26 @@ Board::Board() {
     resize_tt(64);  // Calls the resize function to allocate memory
     clear_tt();     // Clear the table to reset all entries
     loadOpeningBook();
-    maxHistoryValue = 0x0000000000000100;
+    maxHistoryValue = 0x0000000000000100ULL;
     //std::cout << "Number of entries in the transposition table: " << countTranspositionTableEntries() << std::endl;
 }
 
 // Function to initialize the board with the starting positions
 void Board::createBoard() {
     // Initialize the board with starting positions
-    whitePawns = 0x000000000000FF00;
-    blackPawns = 0x00FF000000000000;
-    whiteRooks = 0x0000000000000081;
-    blackRooks = 0x8100000000000000;
-    whiteKnights = 0x0000000000000042;
-    blackKnights = 0x4200000000000000;
-    whiteBishops = 0x0000000000000024;
-    blackBishops = 0x2400000000000000;
-    whiteQueens = 0x0000000000000010;
-    blackQueens = 0x1000000000000000;
-    whiteKing = 0x0000000000000008;
-    blackKing = 0x0800000000000000;
-    enPassantTarget = 0x0;
+    whitePawns = 0x000000000000FF00ULL;
+    blackPawns = 0x00FF000000000000ULL;
+    whiteRooks = 0x0000000000000081ULL;
+    blackRooks = 0x8100000000000000ULL;
+    whiteKnights = 0x0000000000000042ULL;
+    blackKnights = 0x4200000000000000ULL;
+    whiteBishops = 0x0000000000000024ULL;
+    blackBishops = 0x2400000000000000ULL;
+    whiteQueens = 0x0000000000000010ULL;
+    blackQueens = 0x1000000000000000ULL;
+    whiteKing = 0x0000000000000008ULL;
+    blackKing = 0x0800000000000000ULL;
+    enPassantTarget = 0x0ULL;
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
     whiteToMove = true;
@@ -72,10 +80,15 @@ void Board::createBoard() {
     blackKingMoved = false;
     blackLRookMoved = false;
     blackRRookMoved = false;
+
+    positionHistory.clear();
+    updatePositionHistory(true);   // count the initial position as occurrence #1
 }
 
 void Board::createBoardFromFEN(const std::string& fen) {
     parseFEN(fen, *this);
+    positionHistory.clear();
+    updatePositionHistory(true);
 }
 
 void Board::printBoard() {
@@ -152,12 +165,75 @@ void Board::printBoard() {
     // Output FEN string
     std::cout << "FEN: " << fenStream.str() << std::endl;
 }
+   
+static inline bool isSquareAttacked(int targetSquare, bool attackersAreWhite, Bitboard occupiedSquares, Bitboard attackerPawns, Bitboard attackerKnights, Bitboard attackerBishops, Bitboard attackerRooks, Bitboard attackerQueens, Bitboard attackerKing) {
+    const Bitboard targetMask = 1ULL << targetSquare;
+
+    // Pawn attacks (match your engine's shift directions)
+    Bitboard pawnAttacks = attackersAreWhite
+        ? (((attackerPawns << 7) & NOT_A_FILE) | ((attackerPawns << 9) & NOT_H_FILE))
+        : (((attackerPawns >> 7) & NOT_H_FILE) | ((attackerPawns >> 9) & NOT_A_FILE));
+
+    if (pawnAttacks & targetMask) return true;
+
+    // Knight attacks
+    const int knightSteps[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
+    for (int step : knightSteps) {
+        int sq = targetSquare + step;
+        if (sq >= 0 && sq < 64 && std::abs((targetSquare % 8) - (sq % 8)) <= 2) {
+            if (attackerKnights & (1ULL << sq)) return true;
+        }
+    }
+
+    // Bishop/queen diagonal attacks (use occupiedSquares for blockers)
+    const int bishopDirs[4] = { 9, 7, -9, -7 };
+    for (int dir : bishopDirs) {
+        int sq = targetSquare;
+        while (true) {
+            sq += dir;
+            if (sq < 0 || sq >= 64 ||
+                (sq % 8 == 0 && (dir == 9 || dir == -7)) ||
+                (sq % 8 == 7 && (dir == 7 || dir == -9))) break;
+
+            Bitboard sqMask = 1ULL << sq;
+            if ((attackerBishops | attackerQueens) & sqMask) return true;
+            if (occupiedSquares & sqMask) break; // blocked by any piece
+        }
+    }
+
+    // Rook/queen straight attacks (use occupiedSquares for blockers)
+    const int rookDirs[4] = { 8, -8, 1, -1 };
+    for (int dir : rookDirs) {
+        int sq = targetSquare;
+        while (true) {
+            sq += dir;
+            if (sq < 0 || sq >= 64 ||
+                (sq % 8 == 0 && dir == 1) ||
+                (sq % 8 == 7 && dir == -1)) break;
+
+            Bitboard sqMask = 1ULL << sq;
+            if ((attackerRooks | attackerQueens) & sqMask) return true;
+            if (occupiedSquares & sqMask) break; // blocked
+        }
+    }
+
+    // King attacks (adjacent squares)
+    const int kingSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
+    for (int step : kingSteps) {
+        int sq = targetSquare + step;
+        if (sq >= 0 && sq < 64 && std::abs((targetSquare % 8) - (sq % 8)) <= 1) {
+            if (attackerKing & (1ULL << sq)) return true;
+        }
+    }
+
+    return false;
+}
 
 std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
     moves.reserve(64);
     Bitboard emptySquares = ~(ownPieces | opponentPieces);
-    Bitboard promotionRank = whiteToMove ? 0xFF00000000000000 : 0x00000000000000FF;
+    Bitboard promotionRank = whiteToMove ? 0xFF00000000000000ULL : 0x00000000000000FFULL;
 
     // Single pawn moves
     Bitboard singlePush = whiteToMove ? (pawns << 8) & emptySquares : (pawns >> 8) & emptySquares;
@@ -178,7 +254,7 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
     }
 
     // Double pawn moves (only from the starting position)
-    Bitboard startRankMask = whiteToMove ? 0x000000000000FF00 : 0x00FF000000000000;
+    Bitboard startRankMask = whiteToMove ? 0x000000000000FF00ULL : 0x00FF000000000000ULL;
     Bitboard doublePush = whiteToMove ? ((pawns & startRankMask) << 16) & (emptySquares << 8) & emptySquares
         : ((pawns & startRankMask) >> 16) & (emptySquares >> 8) & emptySquares;
     Bitboard doublePushMask = doublePush;
@@ -190,10 +266,10 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
     }
 
     // Pawn captures
-    Bitboard leftCaptures = whiteToMove ? (pawns << 9) & opponentPieces & 0xFEFEFEFEFEFEFEFE
-        : (pawns >> 9) & opponentPieces & 0x7F7F7F7F7F7F7F7F;
-    Bitboard rightCaptures = whiteToMove ? (pawns << 7) & opponentPieces & 0x7F7F7F7F7F7F7F7F
-        : (pawns >> 7) & opponentPieces & 0xFEFEFEFEFEFEFEFE;
+    Bitboard leftCaptures = whiteToMove ? (pawns << 9) & opponentPieces & NOT_H_FILE
+        : (pawns >> 9) & opponentPieces & NOT_A_FILE;
+    Bitboard rightCaptures = whiteToMove ? (pawns << 7) & opponentPieces & NOT_A_FILE
+        : (pawns >> 7) & opponentPieces & NOT_H_FILE;
     int from;
     while (leftCaptures) {
         int to = ctzll(leftCaptures);
@@ -238,10 +314,10 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
     }
 
     // en passant
-    Bitboard leftPassant = whiteToMove ? (pawns << 9) & enPassantTarget & 0xFEFEFEFEFEFEFEFE
-        : (pawns >> 9) & enPassantTarget & 0x7F7F7F7F7F7F7F7F;
-    Bitboard rightPassant = whiteToMove ? (pawns << 7) & enPassantTarget & 0x7F7F7F7F7F7F7F7F
-        : (pawns >> 7) & enPassantTarget & 0xFEFEFEFEFEFEFEFE;
+    Bitboard leftPassant = whiteToMove ? (pawns << 9) & enPassantTarget & NOT_H_FILE
+        : (pawns >> 9) & enPassantTarget & NOT_A_FILE;
+    Bitboard rightPassant = whiteToMove ? (pawns << 7) & enPassantTarget & NOT_A_FILE
+        : (pawns >> 7) & enPassantTarget & NOT_H_FILE;
    
     while (leftPassant) {
         int to = ctzll(leftPassant);
@@ -360,142 +436,146 @@ std::vector<Move> Board::generateKnightMoves(Bitboard knights, Bitboard ownPiece
     return moves;
 }
 
-std::vector<Move> Board::generateKingMoves(Bitboard king, Bitboard ownPieces, Bitboard opponentPieces) {
+std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPieces, Bitboard opponentPieces) {
     std::vector<Move> moves;
-    moves.reserve(32);
-    const int kingMoves[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
+    moves.reserve(16);
 
-    int from = ctzll(king);
-    for (int move : kingMoves) {
-        int to = from + move;
-        if (to < 0 || to >= 64 || (from % 8 == 0 && (move == -1 || move == 7 || move == -9)) ||
-            (from % 8 == 7 && (move == 1 || move == -7 || move == 9))) continue;
+    if (!kingBitboard) return moves;
 
-        if (!(ownPieces & (1ULL << to))) {
-            if (opponentPieces & (1ULL << to)) {
-                Move move(from, to);
-                move.isCapture = true;
-                moves.push_back(move);
+    const int kingSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
+
+    const int kingFromSquare = ctzll(kingBitboard);
+    const Bitboard kingFromMask = 1ULL << kingFromSquare;
+
+    const Bitboard allOccupied = (ownPieces | opponentPieces);
+
+    // Identify opponent piece sets (attackers)
+    const bool attackersAreWhite = !whiteToMove;
+
+    Bitboard attackerPawns   = attackersAreWhite ? whitePawns   : blackPawns;
+    Bitboard attackerKnights = attackersAreWhite ? whiteKnights : blackKnights;
+    Bitboard attackerBishops = attackersAreWhite ? whiteBishops : blackBishops;
+    Bitboard attackerRooks   = attackersAreWhite ? whiteRooks   : blackRooks;
+    Bitboard attackerQueens  = attackersAreWhite ? whiteQueens  : blackQueens;
+    Bitboard attackerKing    = attackersAreWhite ? whiteKing    : blackKing;
+
+    // Occupancy with our king removed (important: king moving can uncover slider attacks)
+    const Bitboard occupiedWithoutOurKing = allOccupied & ~kingFromMask;
+
+    // Generate legal king steps WITHOUT make/undo
+    for (int step : kingSteps) {
+        int kingToSquare = kingFromSquare + step;
+
+        // edge checks (keep exactly as you had them)
+        if (kingToSquare < 0 || kingToSquare >= 64 ||
+            (kingFromSquare % 8 == 0 && (step == -1 || step == 7 || step == -9)) ||
+            (kingFromSquare % 8 == 7 && (step == 1  || step == -7 || step == 9)))
+            continue;
+
+        const Bitboard kingToMask = 1ULL << kingToSquare;
+
+        if (ownPieces & kingToMask) continue;
+
+        // If capturing, remove the captured piece from occupancy + from attacker sets
+        Bitboard occupiedAfterKingMove = occupiedWithoutOurKing;
+
+        Bitboard pawnsAfterCapture   = attackerPawns;
+        Bitboard knightsAfterCapture = attackerKnights;
+        Bitboard bishopsAfterCapture = attackerBishops;
+        Bitboard rooksAfterCapture   = attackerRooks;
+        Bitboard queensAfterCapture  = attackerQueens;
+        Bitboard kingAfterCapture    = attackerKing;
+
+        if (opponentPieces & kingToMask) {
+            occupiedAfterKingMove &= ~kingToMask;
+
+            pawnsAfterCapture   &= ~kingToMask;
+            knightsAfterCapture &= ~kingToMask;
+            bishopsAfterCapture &= ~kingToMask;
+            rooksAfterCapture   &= ~kingToMask;
+            queensAfterCapture  &= ~kingToMask;
+            kingAfterCapture    &= ~kingToMask;
+        }
+
+        // King can't move into check
+        if (isSquareAttacked(
+                kingToSquare,
+                attackersAreWhite,
+                occupiedAfterKingMove,
+                pawnsAfterCapture,
+                knightsAfterCapture,
+                bishopsAfterCapture,
+                rooksAfterCapture,
+                queensAfterCapture,
+                kingAfterCapture
+            )) continue;
+
+        Move m(kingFromSquare, kingToSquare);
+        if (opponentPieces & kingToMask) m.isCapture = true;
+        moves.push_back(m);
+    }
+
+    // Castling: not currently in check, squares between empty, and BOTH crossed squares not attacked.
+    const bool kingCurrentlyInCheck =
+        isSquareAttacked(kingFromSquare, attackersAreWhite, allOccupied,
+                         attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing);
+
+    if (!kingCurrentlyInCheck) {
+        if (whiteToMove) {
+            // White kingside
+            if (!whiteKingMoved && !whiteRRookMoved && (whiteRooks & 0x0000000000000001ULL)) {
+                const Bitboard emptyBetweenMask = 0x0000000000000006ULL;
+                if ((allOccupied & emptyBetweenMask) == 0) {
+                    if (!isSquareAttacked(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
+                        !isSquareAttacked(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                        moves.emplace_back(kingFromSquare, kingFromSquare - 2);
+                    }
+                }
             }
-            else {
-                moves.emplace_back(from, to);
+
+            // White queenside
+            if (!whiteKingMoved && !whiteLRookMoved && (whiteRooks & 0x0000000000000080ULL)) {
+                const Bitboard emptyBetweenMask = 0x0000000000000070ULL;
+                if ((allOccupied & emptyBetweenMask) == 0) {
+                    if (!isSquareAttacked(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
+                        !isSquareAttacked(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                        moves.emplace_back(kingFromSquare, kingFromSquare + 2);
+                    }
+                }
+            }
+        } else {
+            // Black kingside
+            if (!blackKingMoved && !blackRRookMoved && (blackRooks & 0x0100000000000000ULL)) {
+                const Bitboard emptyBetweenMask = 0x0600000000000000ULL;
+                if ((allOccupied & emptyBetweenMask) == 0) {
+                    if (!isSquareAttacked(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
+                        !isSquareAttacked(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                        moves.emplace_back(kingFromSquare, kingFromSquare - 2);
+                    }
+                }
+            }
+
+            // Black queenside
+            if (!blackKingMoved && !blackLRookMoved && (blackRooks & 0x8000000000000000ULL)) {
+                const Bitboard emptyBetweenMask = 0x7000000000000000ULL;
+                if ((allOccupied & emptyBetweenMask) == 0) {
+                    if (!isSquareAttacked(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
+                        !isSquareAttacked(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
+                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                        moves.emplace_back(kingFromSquare, kingFromSquare + 2);
+                    }
+                }
             }
         }
     }
-
-    // Add castling moves
-    if (whiteToMove) {
-        // Kingside castling
-        if (!whiteKingMoved && !whiteRRookMoved && !(ownPieces & 0x0000000000000006) && !(opponentPieces & 0x0000000000000006) && (whiteRooks & 0x0000000000000001)) {
-            if (!amIInCheck(whiteToMove) && !isSquareAttacked(from - 1, whiteToMove)) {
-                moves.emplace_back(from, from - 2); // Kingside castling
-            }
-        }
-        // Queenside castling
-        if (!whiteKingMoved && !whiteLRookMoved && !(ownPieces & 0x0000000000000070) && !(opponentPieces & 0x0000000000000070) && (whiteRooks & 0x0000000000000080)) {
-            if (!amIInCheck(whiteToMove) && !isSquareAttacked(from + 1, whiteToMove)) {
-                moves.emplace_back(from, from + 2); // Queenside castling
-            }
-        }
-    }
-    else {
-        // Kingside castling
-        if (!blackKingMoved && !blackRRookMoved && !(ownPieces & 0x600000000000000) && !(opponentPieces & 0x600000000000000) && (blackRooks & 0x0100000000000000)) {
-            if (!amIInCheck(whiteToMove) && !isSquareAttacked(from - 1, whiteToMove)) {
-                moves.emplace_back(from, from - 2); // Kingside castling
-            }
-        }
-        // Queenside castling
-        if (!blackKingMoved && !blackLRookMoved && !(ownPieces & 0x7000000000000000) && !(opponentPieces & 0x7000000000000000) && (blackRooks & 0x8000000000000000)) {
-            if (!amIInCheck(whiteToMove) && !isSquareAttacked(from + 1, whiteToMove)) {
-                moves.emplace_back(from, from + 2); // Queenside castling
-            }
-        }
-    }
-    std::vector<Move> legalMoves;
-    Bitboard store = enPassantTarget;
-    bool whiteKingMovedStore = whiteKingMoved;
-    bool whiteLRookMovedStore = whiteLRookMoved;
-    bool whiteRRookMovedStore = whiteRRookMoved;
-    bool blackKingMovedStore = blackKingMoved;
-    bool blackLRookMovedStore = blackLRookMoved;
-    bool blackRRookMovedStore = blackRRookMoved;
-    for (Move& move : moves) {
-        makeMove(move);
-        if (!amIInCheck(!whiteToMove)) {
-            legalMoves.push_back(move);
-        }
-        enPassantTarget = store;
-        whiteKingMoved = whiteKingMovedStore;
-        whiteLRookMoved = whiteLRookMovedStore;
-        whiteRRookMoved = whiteRRookMovedStore;
-        blackKingMoved = blackKingMovedStore;
-        blackLRookMoved = blackLRookMovedStore;
-        blackRRookMoved = blackRRookMovedStore;
-        undoMove(move);
-
-    }
-    return legalMoves;
-}
-
-bool Board::isSquareAttacked(int square, bool byWhite) {
-    Bitboard opponentPawns = byWhite ? blackPawns : whitePawns;
-    Bitboard opponentRooks = byWhite ? blackRooks : whiteRooks;
-    Bitboard opponentKnights = byWhite ? blackKnights : whiteKnights;
-    Bitboard opponentBishops = byWhite ? blackBishops : whiteBishops;
-    Bitboard opponentQueens = byWhite ? blackQueens : whiteQueens;
-    Bitboard opponentKing = byWhite ? blackKing : whiteKing;
-
-    // Check for pawn attacks
-    Bitboard pawnAttacks = byWhite ? ((opponentPawns >> 7) & 0xFEFEFEFEFEFEFEFE) | ((opponentPawns >> 9) & 0x7F7F7F7F7F7F7F7F)
-        : ((opponentPawns << 7) & 0x7F7F7F7F7F7F7F7F) | ((opponentPawns << 9) & 0xFEFEFEFEFEFEFEFE);
-    if (pawnAttacks & (1ULL << square)) return true;
-
-    // Check for knight attacks
-    const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
-    for (int move : knightMoves) {
-        int to = square + move;
-        if (to >= 0 && to < 64 && abs((square % 8) - (to % 8)) <= 2) {
-            if (opponentKnights & (1ULL << to)) return true;
-        }
-    }
-
-    // Check for bishop/queen diagonal attacks
-    const int bishopDirections[4] = { 9, 7, -9, -7 };
-    for (int dir : bishopDirections) {
-        int to = square;
-        while (true) {
-            to += dir;
-            if (to < 0 || to >= 64 || (to % 8 == 0 && (dir == 9 || dir == -7)) || (to % 8 == 7 && (dir == 7 || dir == -9))) break;
-            Bitboard posMask = 1ULL << to;
-            if (opponentBishops & posMask || opponentQueens & posMask) return true;
-            if (whitePieces & posMask || blackPieces & posMask) break;
-        }
-    }
-
-    // Check for rook/queen straight attacks
-    const int rookDirections[4] = { 8, -8, 1, -1 };
-    for (int dir : rookDirections) {
-        int to = square;
-        while (true) {
-            to += dir;
-            if (to < 0 || to >= 64 || (to % 8 == 0 && dir == 1) || (to % 8 == 7 && dir == -1)) break;
-            Bitboard posMask = 1ULL << to;
-            if (opponentRooks & posMask || opponentQueens & posMask) return true;
-            if (whitePieces & posMask || blackPieces & posMask) break;
-        }
-    }
-
-    // Check for king attacks
-    const int kingMoves[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
-    for (int move : kingMoves) {
-        int to = square + move;
-        if (to >= 0 && to < 64 && abs((square % 8) - (to % 8)) <= 1) {
-            if (opponentKing & (1ULL << to)) return true;
-        }
-    }
-
-    return false;
+    return moves;
 }
 
 std::vector<Move> Board::generateQueenMoves(Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces) {
@@ -520,15 +600,13 @@ std::vector<Move> Board::generateAllMoves() {
     Bitboard ownPieces = whiteToMove ? whitePieces : blackPieces;
     Bitboard opponentPieces = whiteToMove ? blackPieces : whitePieces;
 
-    // Generate moves for all pieces
-    std::vector<Move> pawnMoves = generatePawnMoves(whiteToMove ? whitePawns : blackPawns, ownPieces, opponentPieces);
+    std::vector<Move> pawnMoves   = generatePawnMoves(whiteToMove ? whitePawns   : blackPawns,   ownPieces, opponentPieces);
     std::vector<Move> bishopMoves = generateBishopMoves(whiteToMove ? whiteBishops : blackBishops, ownPieces, opponentPieces);
-    std::vector<Move> rookMoves = generateRookMoves(whiteToMove ? whiteRooks : blackRooks, ownPieces, opponentPieces);
+    std::vector<Move> rookMoves   = generateRookMoves(whiteToMove ? whiteRooks   : blackRooks,   ownPieces, opponentPieces);
     std::vector<Move> knightMoves = generateKnightMoves(whiteToMove ? whiteKnights : blackKnights, ownPieces, opponentPieces);
-    std::vector<Move> kingMoves = generateKingMoves(whiteToMove ? whiteKing : blackKing, ownPieces, opponentPieces);
-    std::vector<Move> queenMoves = generateQueenMoves(whiteToMove ? whiteQueens : blackQueens, ownPieces, opponentPieces);
-   
-    // Combine all generated moves into one vector
+    std::vector<Move> kingMoves   = generateKingMoves(whiteToMove ? whiteKing    : blackKing,    ownPieces, opponentPieces);
+    std::vector<Move> queenMoves  = generateQueenMoves(whiteToMove ? whiteQueens : blackQueens,  ownPieces, opponentPieces);
+
     allMoves.insert(allMoves.end(), pawnMoves.begin(), pawnMoves.end());
     allMoves.insert(allMoves.end(), bishopMoves.begin(), bishopMoves.end());
     allMoves.insert(allMoves.end(), rookMoves.begin(), rookMoves.end());
@@ -536,47 +614,54 @@ std::vector<Move> Board::generateAllMoves() {
     allMoves.insert(allMoves.end(), queenMoves.begin(), queenMoves.end());
 
     Bitboard ownKing = whiteToMove ? whiteKing : blackKing;
-    // Lets find which pieces might lead to a check if we move them
+
+    // Pieces that might be pinned are "key defenders"
     std::vector<Move> kingMobileMoves = generateQueenMoves(ownKing, opponentPieces, ownPieces);
     std::vector<int> keyDefenderCoords;
+    keyDefenderCoords.reserve(16);
     for (Move& move : kingMobileMoves) {
-        if (move.isCapture) {
-            keyDefenderCoords.push_back(move.to);
-        }
+        if (move.isCapture) keyDefenderCoords.push_back(move.to);
     }
 
-    // Filter out moves that put the king in check
     std::vector<Move> legalMoves;
-    allMoves.reserve(128);
+    legalMoves.reserve(128);
+
     Bitboard store = enPassantTarget;
-    bool whiteKingMovedStore = whiteKingMoved;
-    bool whiteLRookMovedStore = whiteLRookMoved;
-    bool whiteRRookMovedStore = whiteRRookMoved;
-    bool blackKingMovedStore = blackKingMoved;
-    bool blackLRookMovedStore = blackLRookMoved;
-    bool blackRRookMovedStore = blackRRookMoved;
+
     bool currentlyInCheck = amIInCheck(whiteToMove);
+    bool sideToMoveIsWhite = whiteToMove; // capture current side (whiteToMove toggles in makeMove)
+
     for (Move& move : allMoves) {
-        if (!contains(keyDefenderCoords, move.from) && !currentlyInCheck) {
+        // Detect en passant moves so they ALWAYS get checked for legality
+        bool isEnPassantMove = false;
+        if (store & (1ULL << move.to)) {
+            // EP target square matches destination, and the moving piece is a pawn moving diagonally
+            if (sideToMoveIsWhite) {
+                if ((whitePawns & (1ULL << move.from)) && (move.to == move.from + 7 || move.to == move.from + 9)) {
+                    isEnPassantMove = true;
+                }
+            } else {
+                if ((blackPawns & (1ULL << move.from)) && (move.to == move.from - 7 || move.to == move.from - 9)) {
+                    isEnPassantMove = true;
+                }
+            }
+        }
+
+        // Fast-path: only allowed if NOT in check, NOT a key defender, AND NOT en passant
+        if (!currentlyInCheck && !isEnPassantMove && !contains(keyDefenderCoords, move.from)) {
             legalMoves.push_back(move);
             continue;
         }
-        makeMove(move);
+        Undo u;
+        makeMoveFast(move, u);
         if (!amIInCheck(!whiteToMove)) {
             legalMoves.push_back(move);
         }
-        enPassantTarget = store;
-        whiteKingMoved = whiteKingMovedStore;
-        whiteLRookMoved = whiteLRookMovedStore;
-        whiteRRookMoved = whiteRRookMovedStore;
-        blackKingMoved = blackKingMovedStore;
-        blackLRookMoved = blackLRookMovedStore;
-        blackRRookMoved = blackRRookMovedStore;
-        undoMove(move);
-
+        undoMoveFast(move, u);
     }
-    legalMoves.insert(legalMoves.end(), kingMoves.begin(), kingMoves.end());
 
+    // kingMoves already returned legal moves from generateKingMoves()
+    legalMoves.insert(legalMoves.end(), kingMoves.begin(), kingMoves.end());
     return legalMoves;
 }
 
@@ -619,8 +704,8 @@ bool Board::amIInCheck(bool player) {
 
     // Check for pawn attacks
     Bitboard opponentPawns = player ? blackPawns : whitePawns;
-    Bitboard pawnAttacks = player ? ((opponentPawns >> 7) & 0xFEFEFEFEFEFEFEFE) | ((opponentPawns >> 9) & 0x7F7F7F7F7F7F7F7F)
-        : ((opponentPawns << 7) & 0x7F7F7F7F7F7F7F7F) | ((opponentPawns << 9) & 0xFEFEFEFEFEFEFEFE);
+    Bitboard pawnAttacks = player ? ((opponentPawns >> 7) & NOT_H_FILE) | ((opponentPawns >> 9) & NOT_A_FILE)
+        : ((opponentPawns << 7) & NOT_A_FILE) | ((opponentPawns << 9) & NOT_H_FILE);
 
 
     if (pawnAttacks & ownKing) {
@@ -649,26 +734,89 @@ bool Board::amIInCheck(bool player) {
     return false;
 }
 
-void Board::makeMove(Move& move) {
+void Board::makeMove(Move& move, Undo& u) {
+    makeMoveFast(move, u);
+    updatePositionHistory(true);
+}
+
+void Board::undoMove(const Move& move, const Undo& u) {
+    updatePositionHistory(false);
+    undoMoveFast(move, u);
+}
+
+void Board::makeNullMove(Undo& u) {
+    // save state
+    u.prevEnPassantTarget = enPassantTarget;
+
+    u.prevWhiteKingMoved  = whiteKingMoved;
+    u.prevWhiteLRookMoved = whiteLRookMoved;
+    u.prevWhiteRRookMoved = whiteRRookMoved;
+
+    u.prevBlackKingMoved  = blackKingMoved;
+    u.prevBlackLRookMoved = blackLRookMoved;
+    u.prevBlackRRookMoved = blackRRookMoved;
+
+    // null move clears EP
+    enPassantTarget = 0;
+
+    // toggle side
+    whiteToMove = !whiteToMove;
+}
+
+void Board::undoNullMove(const Undo& u) {
+    // toggle side back
+    whiteToMove = !whiteToMove;
+
+    // restore state
+    enPassantTarget = u.prevEnPassantTarget;
+
+    whiteKingMoved  = u.prevWhiteKingMoved;
+    whiteLRookMoved = u.prevWhiteLRookMoved;
+    whiteRRookMoved = u.prevWhiteRRookMoved;
+
+    blackKingMoved  = u.prevBlackKingMoved;
+    blackLRookMoved = u.prevBlackLRookMoved;
+    blackRRookMoved = u.prevBlackRRookMoved;
+}
+
+void Board::makeMoveFast(Move& move, Undo& u) {
+    // ---- store undo state ----
+    u.prevEnPassantTarget = enPassantTarget;
+
+    u.prevWhiteKingMoved  = whiteKingMoved;
+    u.prevWhiteLRookMoved = whiteLRookMoved;
+    u.prevWhiteRRookMoved = whiteRRookMoved;
+
+    u.prevBlackKingMoved  = blackKingMoved;
+    u.prevBlackLRookMoved = blackLRookMoved;
+    u.prevBlackRRookMoved = blackRRookMoved;
+
+    u.capturedPiece = 0;
+    u.wasEnPassant  = false;
+
+    // EP exists for ONE ply only
+    enPassantTarget = 0;
+
     Bitboard fromMask = 1ULL << move.from;
-    Bitboard toMask = 1ULL << move.to;
-    Bitboard enPassantPrev = enPassantTarget;
-    move.capturedPiece = 0; // Reset captured piece
+    Bitboard toMask   = 1ULL << move.to;
 
     if (whiteToMove) {
-        // Update piece bitboards for white
+        // ---------------- WHITE MOVE ----------------
         if (whitePawns & fromMask) {
             whitePawns ^= fromMask | toMask;
-            if (move.to == move.from + 16) {
+
+            // double pawn push → create EP square
+            if (move.to == move.from + 16)
                 enPassantTarget = 1ULL << (move.from + 8);
-            }
-            else if (move.promotion) {
+
+            // promotion
+            if (move.promotion) {
                 whitePawns &= ~toMask;
                 switch (move.promotion) {
-                case 'q': whiteQueens |= toMask; break;
-                case 'r': whiteRooks |= toMask; break;
-                case 'b': whiteBishops |= toMask; break;
-                case 'n': whiteKnights |= toMask; break;
+                    case 'q': whiteQueens  |= toMask; break;
+                    case 'r': whiteRooks   |= toMask; break;
+                    case 'b': whiteBishops |= toMask; break;
+                    case 'n': whiteKnights |= toMask; break;
                 }
             }
         }
@@ -677,73 +825,49 @@ void Board::makeMove(Move& move) {
             if (move.from == 0) whiteRRookMoved = true;
             if (move.from == 7) whiteLRookMoved = true;
         }
-        else if (whiteKnights & fromMask) {
-            whiteKnights ^= fromMask | toMask;
-        }
-        else if (whiteBishops & fromMask) {
-            whiteBishops ^= fromMask | toMask;
-        }
-        else if (whiteQueens & fromMask) {
-            whiteQueens ^= fromMask | toMask;
-        }
-        else if (whiteKing & fromMask) {
+        else if (whiteKnights & fromMask) whiteKnights ^= fromMask | toMask;
+        else if (whiteBishops & fromMask) whiteBishops ^= fromMask | toMask;
+        else if (whiteQueens  & fromMask) whiteQueens  ^= fromMask | toMask;
+        else if (whiteKing    & fromMask) {
             whiteKing ^= fromMask | toMask;
             whiteKingMoved = true;
-            if (move.to == move.from - 2) {
-                whiteRooks ^= 0x0000000000000005;
-            }
-            else if (move.to == move.from + 2) {
-                whiteRooks ^= 0x0000000000000090;
-            }
+
+            // castling rook movement
+            if (move.to == move.from - 2)      whiteRooks ^= 0x0000000000000005ULL; // king-side
+            else if (move.to == move.from + 2) whiteRooks ^= 0x0000000000000090ULL; // queen-side
         }
 
+        // captures
         if (move.isCapture) {
-            if (blackPawns & toMask) {
-                move.capturedPiece = 'p';
-                blackPawns &= ~toMask;
-            }
-            else if (blackRooks & toMask) {
-                move.capturedPiece = 'r';
-                blackRooks &= ~toMask;
-            }
-            else if (blackKnights & toMask) {
-                move.capturedPiece = 'n';
-                blackKnights &= ~toMask;
-            }
-            else if (blackBishops & toMask) {
-                move.capturedPiece = 'b';
-                blackBishops &= ~toMask;
-            }
-            else if (blackQueens & toMask) {
-                move.capturedPiece = 'q';
-                blackQueens &= ~toMask;
-            }
-            else if (blackKing & toMask) {
-                move.capturedPiece = 'k';
-                blackKing &= ~toMask;
-            }
-            else if (enPassantTarget & toMask) {
+            if      (blackPawns   & toMask) { u.capturedPiece='p'; blackPawns   &=~toMask; }
+            else if (blackRooks   & toMask) { u.capturedPiece='r'; blackRooks   &=~toMask; }
+            else if (blackKnights & toMask) { u.capturedPiece='n'; blackKnights &=~toMask; }
+            else if (blackBishops & toMask) { u.capturedPiece='b'; blackBishops &=~toMask; }
+            else if (blackQueens  & toMask) { u.capturedPiece='q'; blackQueens  &=~toMask; }
+            else if (blackKing    & toMask) { u.capturedPiece='k'; blackKing    &=~toMask; }
+            else if (u.prevEnPassantTarget & toMask) {
+                // en-passant capture: capture pawn behind EP target square
+                u.wasEnPassant  = true;
+                u.capturedPiece = 'p';
                 blackPawns &= ~(toMask >> 8);
             }
         }
-        whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
-        blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
-
     }
     else {
-        // Update piece bitboards for black
+        // ---------------- BLACK MOVE ----------------
         if (blackPawns & fromMask) {
             blackPawns ^= fromMask | toMask;
-            if (move.to == move.from - 16) {
+
+            if (move.to == move.from - 16)
                 enPassantTarget = 1ULL << (move.from - 8);
-            }
-            else if (move.promotion) {
+
+            if (move.promotion) {
                 blackPawns &= ~toMask;
                 switch (move.promotion) {
-                case 'q': blackQueens |= toMask; break;
-                case 'r': blackRooks |= toMask; break;
-                case 'b': blackBishops |= toMask; break;
-                case 'n': blackKnights |= toMask; break;
+                    case 'q': blackQueens  |= toMask; break;
+                    case 'r': blackRooks   |= toMask; break;
+                    case 'b': blackBishops |= toMask; break;
+                    case 'n': blackKnights |= toMask; break;
                 }
             }
         }
@@ -752,233 +876,131 @@ void Board::makeMove(Move& move) {
             if (move.from == 56) blackRRookMoved = true;
             if (move.from == 63) blackLRookMoved = true;
         }
-        else if (blackKnights & fromMask) {
-            blackKnights ^= fromMask | toMask;
-        }
-        else if (blackBishops & fromMask) {
-            blackBishops ^= fromMask | toMask;
-        }
-        else if (blackQueens & fromMask) {
-            blackQueens ^= fromMask | toMask;
-        }
-        else if (blackKing & fromMask) {
+        else if (blackKnights & fromMask) blackKnights ^= fromMask | toMask;
+        else if (blackBishops & fromMask) blackBishops ^= fromMask | toMask;
+        else if (blackQueens  & fromMask) blackQueens  ^= fromMask | toMask;
+        else if (blackKing    & fromMask) {
             blackKing ^= fromMask | toMask;
             blackKingMoved = true;
-            if (move.to == move.from - 2) {
-                blackRooks ^= 0x0500000000000000;
-            }
-            else if (move.to == move.from + 2) {
-                blackRooks ^= 0x9000000000000000;
-            }
+
+            if (move.to == move.from - 2)      blackRooks ^= 0x0500000000000000ULL; // king-side
+            else if (move.to == move.from + 2) blackRooks ^= 0x9000000000000000ULL; // queen-side
         }
 
         if (move.isCapture) {
-            if (whitePawns & toMask) {
-                move.capturedPiece = 'p';
-                whitePawns &= ~toMask;
-            }
-            else if (whiteRooks & toMask) {
-                move.capturedPiece = 'r';
-                whiteRooks &= ~toMask;
-            }
-            else if (whiteKnights & toMask) {
-                move.capturedPiece = 'n';
-                whiteKnights &= ~toMask;
-            }
-            else if (whiteBishops & toMask) {
-                move.capturedPiece = 'b';
-                whiteBishops &= ~toMask;
-            }
-            else if (whiteQueens & toMask) {
-                move.capturedPiece = 'q';
-                whiteQueens &= ~toMask;
-            }
-            else if (whiteKing & toMask) {
-                move.capturedPiece = 'k';
-                whiteKing &= ~toMask;
-            }
-            else if (enPassantTarget & toMask) {
+            if      (whitePawns   & toMask) { u.capturedPiece='p'; whitePawns   &=~toMask; }
+            else if (whiteRooks   & toMask) { u.capturedPiece='r'; whiteRooks   &=~toMask; }
+            else if (whiteKnights & toMask) { u.capturedPiece='n'; whiteKnights &=~toMask; }
+            else if (whiteBishops & toMask) { u.capturedPiece='b'; whiteBishops &=~toMask; }
+            else if (whiteQueens  & toMask) { u.capturedPiece='q'; whiteQueens  &=~toMask; }
+            else if (whiteKing    & toMask) { u.capturedPiece='k'; whiteKing    &=~toMask; }
+            else if (u.prevEnPassantTarget & toMask) {
+                u.wasEnPassant  = true;
+                u.capturedPiece = 'p';
                 whitePawns &= ~(toMask << 8);
             }
         }
-        whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
-        blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
     }
 
-    if (move.promotion) {
-        if (whiteToMove) {
-            whitePawns &= ~toMask;
-            switch (move.promotion) {
-            case 'q': whiteQueens |= toMask; break;
-            case 'r': whiteRooks |= toMask; break;
-            case 'b': whiteBishops |= toMask; break;
-            case 'n': whiteKnights |= toMask; break;
-            }
-        }
-        else {
-            blackPawns &= ~toMask;
-            switch (move.promotion) {
-            case 'q': blackQueens |= toMask; break;
-            case 'r': blackRooks |= toMask; break;
-            case 'b': blackBishops |= toMask; break;
-            case 'n': blackKnights |= toMask; break;
-            }
-        }
-    }
-
-    if (enPassantPrev == enPassantTarget) {
-        enPassantTarget = 0x0;
-    }
+    whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
+    blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
     whiteToMove = !whiteToMove;
 }
 
-void Board::undoMove(const Move& move) {
+void Board::undoMoveFast(const Move& move, const Undo& u) {
+    enPassantTarget = u.prevEnPassantTarget;
+
+    whiteKingMoved  = u.prevWhiteKingMoved;
+    whiteLRookMoved = u.prevWhiteLRookMoved;
+    whiteRRookMoved = u.prevWhiteRRookMoved;
+
+    blackKingMoved  = u.prevBlackKingMoved;
+    blackLRookMoved = u.prevBlackLRookMoved;
+    blackRRookMoved = u.prevBlackRRookMoved;
+
     Bitboard fromMask = 1ULL << move.from;
-    Bitboard toMask = 1ULL << move.to;
+    Bitboard toMask   = 1ULL << move.to;
 
     if (!whiteToMove) {
-        // Handle undoing promotions
+        // undo WHITE move (because side-to-move was toggled in makeMoveFast)
         if (move.promotion) {
             whitePawns |= fromMask;
             switch (move.promotion) {
-            case 'q': whiteQueens &= ~toMask; break;
-            case 'r': whiteRooks &= ~toMask; break;
-            case 'b': whiteBishops &= ~toMask; break;
-            case 'n': whiteKnights &= ~toMask; break;
+                case 'q': whiteQueens  &= ~toMask; break;
+                case 'r': whiteRooks   &= ~toMask; break;
+                case 'b': whiteBishops &= ~toMask; break;
+                case 'n': whiteKnights &= ~toMask; break;
             }
         }
-        else if (whitePawns & toMask) {
-            whitePawns ^= fromMask | toMask;
-        }
-        else if (whiteRooks & toMask) {
-            whiteRooks ^= fromMask | toMask;
-        }
-        else if (whiteKnights & toMask) {
-            whiteKnights ^= fromMask | toMask;
-        }
-        else if (whiteBishops & toMask) {
-            whiteBishops ^= fromMask | toMask;
-        }
-        else if (whiteQueens & toMask) {
-            whiteQueens ^= fromMask | toMask;
-        }
-        else if (whiteKing & toMask) {
+        else if (whitePawns   & toMask) whitePawns   ^= fromMask | toMask;
+        else if (whiteRooks   & toMask) whiteRooks   ^= fromMask | toMask;
+        else if (whiteKnights & toMask) whiteKnights ^= fromMask | toMask;
+        else if (whiteBishops & toMask) whiteBishops ^= fromMask | toMask;
+        else if (whiteQueens  & toMask) whiteQueens  ^= fromMask | toMask;
+        else if (whiteKing    & toMask) {
             whiteKing ^= fromMask | toMask;
-            if (move.to == move.from - 2) { // Kingside castling
-                whiteRooks ^= 0x0000000000000005; // Move the rook
-            }
-            else if (move.to == move.from + 2) { // Queenside castling
-                whiteRooks ^= 0x0000000000000090; // Move the rook
-            }
+            if (move.to == move.from - 2)      whiteRooks ^= 0x0000000000000005ULL;
+            else if (move.to == move.from + 2) whiteRooks ^= 0x0000000000000090ULL;
         }
 
-        // Handle captures
         if (move.isCapture) {
-            // Restore the pawn for en passant captures
-            if ((move.to == move.from + 9 || move.to == move.from + 7)) {
-                if (toMask & enPassantTarget) {
-                    blackPawns |= toMask >> 8;
+            if (u.wasEnPassant) {
+                blackPawns |= (toMask >> 8);
+            } else {
+                switch (u.capturedPiece) {
+                    case 'p': blackPawns   |= toMask; break;
+                    case 'r': blackRooks   |= toMask; break;
+                    case 'n': blackKnights |= toMask; break;
+                    case 'b': blackBishops |= toMask; break;
+                    case 'q': blackQueens  |= toMask; break;
+                    case 'k': blackKing    |= toMask; break;
                 }
-            }
-
-            switch (move.capturedPiece) {
-            case 'p': blackPawns |= toMask; break;
-            case 'r': blackRooks |= toMask; break;
-            case 'n': blackKnights |= toMask; break;
-            case 'b': blackBishops |= toMask; break;
-            case 'q': blackQueens |= toMask; break;
-            case 'k': blackKing |= toMask; break;
             }
         }
     }
     else {
-        // Handle undoing promotions
+        // undo BLACK move
         if (move.promotion) {
             blackPawns |= fromMask;
             switch (move.promotion) {
-            case 'q': blackQueens &= ~toMask; break;
-            case 'r': blackRooks &= ~toMask; break;
-            case 'b': blackBishops &= ~toMask; break;
-            case 'n': blackKnights &= ~toMask; break;
+                case 'q': blackQueens  &= ~toMask; break;
+                case 'r': blackRooks   &= ~toMask; break;
+                case 'b': blackBishops &= ~toMask; break;
+                case 'n': blackKnights &= ~toMask; break;
             }
         }
-        else if (blackPawns & toMask) {
-            blackPawns ^= fromMask | toMask;
-        }
-        else if (blackRooks & toMask) {
-            blackRooks ^= fromMask | toMask;
-        }
-        else if (blackKnights & toMask) {
-            blackKnights ^= fromMask | toMask;
-        }
-        else if (blackBishops & toMask) {
-            blackBishops ^= fromMask | toMask;
-        }
-        else if (blackQueens & toMask) {
-            blackQueens ^= fromMask | toMask;
-        }
-        else if (blackKing & toMask) {
+        else if (blackPawns   & toMask) blackPawns   ^= fromMask | toMask;
+        else if (blackRooks   & toMask) blackRooks   ^= fromMask | toMask;
+        else if (blackKnights & toMask) blackKnights ^= fromMask | toMask;
+        else if (blackBishops & toMask) blackBishops ^= fromMask | toMask;
+        else if (blackQueens  & toMask) blackQueens  ^= fromMask | toMask;
+        else if (blackKing    & toMask) {
             blackKing ^= fromMask | toMask;
-            if (move.to == move.from - 2) { // Kingside castling
-                blackRooks ^= 0x0500000000000000; // Move the rook
-            }
-            else if (move.to == move.from + 2) { // Queenside castling
-                blackRooks ^= 0x9000000000000000; // Move the rook
-            }
+            if (move.to == move.from - 2)      blackRooks ^= 0x0500000000000000ULL;
+            else if (move.to == move.from + 2) blackRooks ^= 0x9000000000000000ULL;
         }
 
-        // Handle captures
         if (move.isCapture) {
-            // Restore the pawn for en passant captures
-            if ((move.to == move.from - 9 || move.to == move.from - 7)) {
-                if (toMask & enPassantTarget) {
-                    whitePawns |= toMask << 8;
+            if (u.wasEnPassant) {
+                whitePawns |= (toMask << 8);
+            } else {
+                switch (u.capturedPiece) {
+                    case 'p': whitePawns   |= toMask; break;
+                    case 'r': whiteRooks   |= toMask; break;
+                    case 'n': whiteKnights |= toMask; break;
+                    case 'b': whiteBishops |= toMask; break;
+                    case 'q': whiteQueens  |= toMask; break;
+                    case 'k': whiteKing    |= toMask; break;
                 }
-            }
-
-            switch (move.capturedPiece) {
-            case 'p': whitePawns |= toMask; break;
-            case 'r': whiteRooks |= toMask; break;
-            case 'n': whiteKnights |= toMask; break;
-            case 'b': whiteBishops |= toMask; break;
-            case 'q': whiteQueens |= toMask; break;
-            case 'k': whiteKing |= toMask; break;
             }
         }
     }
+
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
-    whiteToMove = !whiteToMove; // Toggle the side to move
-}
 
-void Board::makeNullMove() {
-    // Toggle the side to move
     whiteToMove = !whiteToMove;
-
-    // Store board data
-    whiteKingMovedPrev = whiteKingMoved;
-    whiteLRookMovedPrev = whiteLRookMoved;
-    whiteRRookMovedPrev = whiteRRookMoved;
-    blackKingMovedPrev = blackKingMoved;
-    blackLRookMovedPrev = blackLRookMoved;
-    blackRRookMovedPrev = blackRRookMoved;
-    enPassantPrev = enPassantTarget;
-    enPassantTarget = 0x0;
-}
-
-void Board::undoNullMove() {
-    // Toggle the side to move back
-    whiteToMove = !whiteToMove;
-
-    // Restore previous board data
-    enPassantTarget = enPassantPrev;
-    whiteKingMoved = whiteKingMovedPrev;
-    whiteLRookMoved = whiteLRookMovedPrev;
-    whiteRRookMoved = whiteRRookMovedPrev;
-    blackKingMoved = blackKingMovedPrev;
-    blackLRookMoved = blackLRookMovedPrev;
-    blackRRookMoved = blackRRookMovedPrev;
 }
 
 void setBit(Bitboard& bitboard, int square) {
@@ -1029,7 +1051,7 @@ void parseFEN(const std::string& fen, Board& board) {
         if (c == '/') {
             continue;
         }
-        else if (isdigit(c)) {
+        if (isdigit((unsigned char)c)) {
             square -= (c - '0');
         }
         else {
@@ -1053,6 +1075,8 @@ void parseFEN(const std::string& fen, Board& board) {
 
     // Set the active color
     board.whiteToMove = (activeColor == "w");
+
+    board.enPassantTarget = 0;
 
     // Handle the en passant target square if there is one
     if (enPassant != "-") {
@@ -1097,18 +1121,18 @@ int Board::getEnPassantFile() const {
 
 int Board::getPieceIndex(char piece) const {
     switch (piece) {
-    case 'P': return 0;
-    case 'N': return 1;
-    case 'B': return 2;
-    case 'R': return 3;
-    case 'Q': return 4;
-    case 'K': return 5;
-    case 'p': return 6;
-    case 'n': return 7;
-    case 'b': return 8;
-    case 'r': return 9;
-    case 'q': return 10;
-    case 'k': return 11;
+    case 'p': return 0;
+    case 'n': return 1;
+    case 'b': return 2;
+    case 'r': return 3;
+    case 'q': return 4;
+    case 'k': return 5;
+    case 'P': return 6;
+    case 'N': return 7;
+    case 'B': return 8;
+    case 'R': return 9;
+    case 'Q': return 10;
+    case 'K': return 11;
     default: return -1;
     }
 }
@@ -1151,16 +1175,22 @@ uint64_t Board::generateZobristHash() const {
 void Board::updatePositionHistory(bool plus) {
     uint64_t hash = generateZobristHash();
     if (plus){
-        positionHistory[hash]++;
+        positionHistory[hash] += 1;
     }
     else {
-        positionHistory[hash]--;
+        auto it = positionHistory.find(hash);
+        if (it != positionHistory.end()) {
+            it->second -= 1;
+            if (it->second <= 0) positionHistory.erase(it);
+        }
     }
 }
 
 bool Board::isThreefoldRepetition() {
     uint64_t hash = generateZobristHash();
-    return positionHistory[hash] >= 2;
+    auto it = positionHistory.find(hash);
+    int count = (it == positionHistory.end()) ? 0 : it->second;
+    return count >= 3;;
 }
 
 bool Board::isThreefoldRepetition(uint64_t hash) {
@@ -1197,29 +1227,38 @@ int Board::posToValue(int from) {
 }
 
 int isGoodCapture(const Move& move, const Board& board) {
-    if (!move.isCapture) {
-        return 0;
-    }
+    if (!move.isCapture) return 0;
+
     char attackerPiece = board.getPieceAt(move.from);
-    char defenderPiece = move.capturedPiece;
+
+    // Default victim is whatever is on the destination square
+    char victimPiece = board.getPieceAt(move.to);
+
+    // If destination square is empty but capture flag is set,
+    if (victimPiece == ' ') {
+        // Determine EP victim square from side to move and your coordinate system.
+        // In your engine: white pawn push = +8, so white EP captures remove pawn at to-8.
+        int victimSq = board.whiteToMove ? (move.to - 8) : (move.to + 8);
+        victimPiece = board.getPieceAt(victimSq);
+    }
 
     int attackerValue = getPieceValue(attackerPiece);
-    int defenderValue = getPieceValue(defenderPiece);
-    int sumGain = defenderValue - attackerValue;
-    return sumGain;
+    int victimValue   = getPieceValue(victimPiece);
+    return victimValue - attackerValue;
 }
 
 bool isEqualCapture(const Move& move, const Board& board) {
-    if (!move.isCapture) {
-        return false;
-    }
+    if (!move.isCapture) return false;
+
     char attackerPiece = board.getPieceAt(move.from);
-    char defenderPiece = move.capturedPiece;
+    char victimPiece = board.getPieceAt(move.to);
 
-    int attackerValue = getPieceValue(attackerPiece);
-    int defenderValue = getPieceValue(defenderPiece);
+    if (victimPiece == ' ') {
+        int victimSq = board.whiteToMove ? (move.to - 8) : (move.to + 8);
+        victimPiece = board.getPieceAt(victimSq);
+    }
 
-    return defenderValue == attackerValue;
+    return getPieceValue(attackerPiece) == getPieceValue(victimPiece);
 }
 
 bool isKillerMove(const Move& move, const Board& board, int depth) {
@@ -1321,7 +1360,7 @@ bool isTacticalPosition(std::vector<Move> moves, Board board) {
 
 void Board::resize_tt(uint64_t mb) {
     size_t entries = (mb * 1048576ull) / sizeof(TT_Entry);
-    size_t new_entries = 1ull << (int)std::log2(entries);  // Ensures power of 2 size for efficient indexing
+    size_t new_entries = 1ull << (int)std::log2((double)entries);
     transposition_table.resize(new_entries);
     clear_tt();  // Clear the table to ensure all entries are reset after resizing
 }
@@ -1382,8 +1421,6 @@ std::istream& operator>>(std::istream& is, Move& move) {
     is.read(reinterpret_cast<char*>(&move.from), sizeof(move.from));
     is.read(reinterpret_cast<char*>(&move.to), sizeof(move.to));
     is.read(reinterpret_cast<char*>(&move.promotion), sizeof(move.promotion));
-    is.read(reinterpret_cast<char*>(&move.isCapture), sizeof(move.isCapture));
-    is.read(reinterpret_cast<char*>(&move.capturedPiece), sizeof(move.capturedPiece));
     return is;
 }
 

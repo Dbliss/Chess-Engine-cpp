@@ -7,7 +7,6 @@
 #include <SFML/Audio.hpp>
 #include "chess.h"
 #include <vector>
-#include "engine2.h"
 
 class BoardDisplay {
 public:

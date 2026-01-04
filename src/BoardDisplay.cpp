@@ -189,7 +189,8 @@ bool BoardDisplay::handleMove(sf::RenderWindow& window, Board& board) {
                 // Check if the move is legal
                 for (Move& legalMove : legalMoves) {
                     if (legalMove.from == from && legalMove.to == to) {
-                        board.makeMove(legalMove);
+                        Undo u;
+                        board.makeMove(legalMove, u);
                         board.lastMove = legalMove;
                         board.printBoard();
                         updatePieces(window, board);

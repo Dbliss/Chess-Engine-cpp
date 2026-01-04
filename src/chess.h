@@ -30,27 +30,36 @@ class Move {
 public:
     int from;
     int to;
-    char promotion;
+    char promotion;   // 'q','r','b','n' or 0
     bool isCapture;
-    char capturedPiece;
 
-    // Default constructor
-    Move() : from(-1), to(-1), promotion(0), isCapture(false), capturedPiece(0) {}
-
-    Move(int f, int t, char p = 0, bool e = false, bool c = false, char captured = 0)
-        : from(f), to(t), promotion(p), isCapture(c), capturedPiece(captured) {}
+    Move() : from(-1), to(-1), promotion(0), isCapture(false) {}
+    Move(int f, int t, char p = 0) : from(f), to(t), promotion(p), isCapture(false) {}
 
     bool operator==(const Move& other) const {
-        return from == other.from && to == other.to && promotion == other.promotion &&
-            isCapture == other.isCapture && capturedPiece == other.capturedPiece;
+        return from == other.from && to == other.to && promotion == other.promotion;
     }
-
-    bool operator!=(const Move& other) const {
-        return !(*this == other);
-    }
+    bool operator!=(const Move& other) const { return !(*this == other); }
 };
 
 extern const Move NO_MOVE;
+
+struct Undo {
+    // EP state
+    Bitboard prevEnPassantTarget = 0;
+
+    // Castling-right flags (your engine uses these booleans as "moved" flags)
+    bool prevWhiteKingMoved  = false;
+    bool prevWhiteLRookMoved = false;
+    bool prevWhiteRRookMoved = false;
+    bool prevBlackKingMoved  = false;
+    bool prevBlackLRookMoved = false;
+    bool prevBlackRRookMoved = false;
+
+    // Capture info
+    char capturedPiece = 0;   // 'p','n','b','r','q','k' or 0
+    bool wasEnPassant  = false;
+};
 
 enum TTFlag {
     HASH_FLAG_EXACT,  // Exact score
@@ -125,9 +134,10 @@ public:
     std::vector<Move> generateQueenMoves(Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces);
     std::vector<Move> generateAllMoves();
     bool amIInCheck(bool player);
-    void makeMove(Move& move);
-    void undoMove(const Move& move);
-    bool isSquareAttacked(int square, bool byWhite);
+    void makeMove(Move& move, Undo& u);
+    void undoMove(const Move& move, const Undo& u);
+    void makeMoveFast(Move& move, Undo& u);
+    void undoMoveFast(const Move& move, const Undo& u);
     char getPieceAt(int index) const;
 
     void updatePositionHistory(bool plus);
@@ -145,8 +155,8 @@ public:
     short probe_tt_entry(uint64_t hash_key, int alpha, int beta, int depth, TT_Entry& return_entry);
     TT_Entry* probeTranspositionTable(uint64_t hash);
     size_t countTranspositionTableEntries() const;
-    void makeNullMove();
-    void undoNullMove();
+    void makeNullMove(Undo& u);
+    void undoNullMove(const Undo& u);
     int posToValue(int from);
     void updateHistory(int from, int to, int bonus);
     void loadOpeningBook();

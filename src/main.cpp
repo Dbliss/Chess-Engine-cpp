@@ -1,22 +1,24 @@
-#include "engine2.h"
+#include "engine.h"
 #include "BoardDisplay.h"
 #include "chess.h"
-#include <thread>
 #include "zobrist.h"
+
+#include <thread>
 #include <bit>
 
+// Optional helper (you already had it); still valid because engine.h keeps isEndgameDraw().
 bool isDrawByMaterial(Board board) {
-    int numWhitePawns = std::popcount(board.whitePawns);
+    int numWhitePawns   = std::popcount(board.whitePawns);
     int numWhiteBishops = std::popcount(board.whiteBishops);
     int numWhiteKnights = std::popcount(board.whiteKnights);
-    int numWhiteRooks = std::popcount(board.whiteRooks);
-    int numWhiteQueens = std::popcount(board.whiteQueens);
+    int numWhiteRooks   = std::popcount(board.whiteRooks);
+    int numWhiteQueens  = std::popcount(board.whiteQueens);
 
-    int numBlackPawns = std::popcount(board.blackPawns);
+    int numBlackPawns   = std::popcount(board.blackPawns);
     int numBlackBishops = std::popcount(board.blackBishops);
     int numBlackKnights = std::popcount(board.blackKnights);
-    int numBlackRooks = std::popcount(board.blackRooks);
-    int numBlackQueens = std::popcount(board.blackQueens);
+    int numBlackRooks   = std::popcount(board.blackRooks);
+    int numBlackQueens  = std::popcount(board.blackQueens);
 
     // Encourage draws if both sides have no pawns or major pieces left and only up to one minor piece each.
     if (!numWhitePawns && !numBlackPawns &&
@@ -24,38 +26,12 @@ bool isDrawByMaterial(Board board) {
         !numWhiteRooks && !numBlackRooks) {
 
         // If both sides have at most one minor piece each, this is a draw
-        if (isEndgameDraw(numWhiteBishops, numWhiteKnights, numBlackKnights, numBlackBishops) || (numWhiteBishops + numWhiteKnights + numBlackKnights + numBlackBishops <= 1)) {
+        if (isEndgameDraw(numWhiteBishops, numWhiteKnights, numBlackKnights, numBlackBishops) ||
+            (numWhiteBishops + numWhiteKnights + numBlackKnights + numBlackBishops <= 1)) {
             return true;
         }
     }
     return false;
-}
-
-void startPonderingThread(std::thread& ponderingThread, Board& dupBoard) {
-    if (ponderingThread.joinable()) {
-        ponderingThread.join();
-    }
-    isPonderingRunning = true;
-    endTime2 = (std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(999999));
-    ponderingThread = std::thread(ponderEngine2, std::ref(dupBoard));
-}
-
-void updatePonderingThread(Board& board, Board& dupBoard) {
-    isPonderingRunning = false;
-    endTime2 = std::chrono::high_resolution_clock::now();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    board.transposition_table = dupBoard.transposition_table;
-    dupBoard = board;
-    isPonderingRunning = true;
-    endTime2 = (std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(999999));
-}
-
-void stopPonderingThread(std::thread& ponderingThread, Board& board, Board& dupboard) {
-    endTime2 = std::chrono::high_resolution_clock::now();
-    isPonderingRunning = false;
-    if (ponderingThread.joinable()) {
-        ponderingThread.join();
-    }
 }
 
 void playAgainstComputer();
@@ -70,14 +46,18 @@ void displayEndGameMessage(sf::RenderWindow& window, const std::string& message)
     sf::Text endMessage(font, message, 50);
     endMessage.setFillColor(sf::Color::Red);
     endMessage.setStyle(sf::Text::Bold);
-    endMessage.setPosition({window.getSize().x / 2.0f - endMessage.getGlobalBounds().size.x / 2.0f, window.getSize().y / 3.0f});
+    endMessage.setPosition({window.getSize().x / 2.0f - endMessage.getGlobalBounds().size.x / 2.0f,
+                            window.getSize().y / 3.0f});
 
     sf::Text playAgainButton(font, "Want to play again?", 30);
     playAgainButton.setFillColor(sf::Color::Green);
     playAgainButton.setStyle(sf::Text::Bold);
-    playAgainButton.setPosition({window.getSize().x / 2.0f - playAgainButton.getGlobalBounds().size.x / 2.0f, window.getSize().y / 2.0f});
+    playAgainButton.setPosition({window.getSize().x / 2.0f - playAgainButton.getGlobalBounds().size.x / 2.0f,
+                                 window.getSize().y / 2.0f});
 
-    sf::RectangleShape playAgainButtonBox(sf::Vector2f(playAgainButton.getGlobalBounds().size.x + 20, playAgainButton.getGlobalBounds().size.y + 10));
+    sf::RectangleShape playAgainButtonBox(
+        sf::Vector2f(playAgainButton.getGlobalBounds().size.x + 20,
+                     playAgainButton.getGlobalBounds().size.y + 10));
     playAgainButtonBox.setPosition({playAgainButton.getPosition().x - 10, playAgainButton.getPosition().y - 5});
     playAgainButtonBox.setFillColor(sf::Color::Transparent);
     playAgainButtonBox.setOutlineThickness(2);
@@ -106,20 +86,28 @@ void displayEndGameMessage(sf::RenderWindow& window, const std::string& message)
 }
 
 void playAgainstComputer() {
+    // NOTE: engine.cpp (Engine) doesn’t use your old engine2 pondering globals/threads.
+    // This keeps the UI toggle, but it is currently cosmetic (no background search).
     bool ponderingOn = false;
-    int timeLimit = 3000; //milliseconds
+
+    int timeLimit = 3000; // milliseconds
     char playerColor = 'w';
     bool startGame = false;
 
     initializeZobristTable();
+
     Board board;
     board.createBoard();
-    //board.createBoardFromFEN("8/1p5p/p1pP3k/7p/P3r1P1/7P/2K5/2R5 w - - 0 1");
+    // board.createBoardFromFEN("8/1p5p/p1pP3k/7p/P3r1P1/7P/2K5/2R5 w - - 0 1");
     board.printBoard();
+
     BoardDisplay display;
     display.setupPieces(board);
 
-    sf::RenderWindow window(sf::VideoMode({static_cast<unsigned int>(display.tileSize * 8 + 330), static_cast<unsigned int>(display.tileSize * 8)}), "Chess Board");
+    sf::RenderWindow window(
+        sf::VideoMode({static_cast<unsigned int>(display.tileSize * 8 + 330),
+                       static_cast<unsigned int>(display.tileSize * 8)}),
+        "Chess Board");
 
     // Create UI elements
     sf::Font font;
@@ -169,8 +157,11 @@ void playAgainstComputer() {
     sf::Text ponderingText(font, ponderingOn ? "Yes" : "No", 20);
     ponderingText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 270});
 
-    Board dupBoard = board;
-    std::thread ponderingThread;
+    // ---- NEW: Engine instance (replaces engine2.cpp functions) ----
+    EngineConfig cfg;
+    cfg.timeLimitMs = timeLimit;
+    Engine engine(cfg);
+
     bool isPlayerTurn = (playerColor == 'w');
 
     while (window.isOpen()) {
@@ -183,8 +174,10 @@ void playAgainstComputer() {
 
                 if (startButtonBox.getGlobalBounds().contains(mousePos)) {
                     startGame = true;
-                    dupBoard = board;
-                    if (ponderingOn) startPonderingThread(ponderingThread, dupBoard);
+
+                    // reset engine heuristics/TT for a clean game
+                    engine.newGame();
+
                     isPlayerTurn = (playerColor == 'w');
                 }
 
@@ -197,15 +190,16 @@ void playAgainstComputer() {
                     if (mousePos.x < timeLimitLabel.getPosition().x + timeLimitLabel.getGlobalBounds().size.x / 2) {
                         if (timeLimit > 1000) {
                             timeLimit -= 1000;
-                        }
-                        else if (timeLimit > 100) {
+                        } else if (timeLimit > 100) {
                             timeLimit -= 100;
                         }
-                    }
-                    else {
+                    } else {
                         timeLimit += 1000;
                     }
                     timeLimitText.setString(std::to_string(timeLimit));
+
+                    // push new time limit into engine
+                    engine.setTimeLimitMs(timeLimit);
                 }
 
                 if (ponderingBox.getGlobalBounds().contains(mousePos)) {
@@ -235,6 +229,7 @@ void playAgainstComputer() {
 
         if (startGame) {
             std::string endGameMessage;
+
             while (window.isOpen()) {
                 while (auto innerEvent = window.pollEvent()) {
                     if (innerEvent->is<sf::Event::Closed>())
@@ -244,69 +239,63 @@ void playAgainstComputer() {
                 if (isPlayerTurn) {
                     // Check for game end
                     if (board.generateAllMoves().empty()) {
-                        if (board.amIInCheck(board.whiteToMove)) {
-                            endGameMessage = "You lose";
-                        }
-                        else {
-                            endGameMessage = "Draw";
-                        }
+                        if (board.amIInCheck(board.whiteToMove)) endGameMessage = "You lose";
+                        else endGameMessage = "Draw";
+
                         std::this_thread::sleep_for(std::chrono::milliseconds(3000));
                         displayEndGameMessage(window, endGameMessage);
                         return;
-                    }
-                    else if (board.isThreefoldRepetition(false)) {
+                    } else if (board.isThreefoldRepetition()) {
                         endGameMessage = "Draw";
                         std::this_thread::sleep_for(std::chrono::milliseconds(3000));
                         displayEndGameMessage(window, endGameMessage);
                         return;
                     }
+
                     if (display.handleMove(window, board)) {
-                        std::cout << "Player move made" << std::endl;
-                        if (ponderingOn) updatePonderingThread(board, dupBoard);
-                        board.updatePositionHistory(true);
                         std::cout << "Player move made" << std::endl;
                         isPlayerTurn = false;
                     }
-                }
-                else {
+                } else {
                     // Check for game end
                     if (board.generateAllMoves().empty()) {
-                        if (board.amIInCheck(board.whiteToMove)) {
-                            endGameMessage = "You win";
-                        }
-                        else {
-                            endGameMessage = "Draw";
-                        }
+                        if (board.amIInCheck(board.whiteToMove)) endGameMessage = "You win";
+                        else endGameMessage = "Draw";
+
                         std::this_thread::sleep_for(std::chrono::milliseconds(3000));
                         displayEndGameMessage(window, endGameMessage);
                         return;
-                    }
-                    else if (board.isThreefoldRepetition(false)) {
+                    } else if (board.isThreefoldRepetition()) {
                         endGameMessage = "Draw";
                         std::this_thread::sleep_for(std::chrono::milliseconds(3000));
                         displayEndGameMessage(window, endGameMessage);
                         return;
                     }
-                    Move engineMove = getEngineMove2(board, timeLimit);
-                    board.makeMove(engineMove);
+
+                    // ---- REPLACED: getEngineMove2(board, timeLimit) ----
+                    engine.setTimeLimitMs(timeLimit);
+                    Move engineMove = engine.getMove(board);
+
+                    Undo u;
+                    board.makeMove(engineMove, u);
                     std::cout << engineMove.from << engineMove.to << std::endl;
                     board.lastMove = engineMove;
-                    board.updatePositionHistory(true);
                     board.printBoard();
+
                     display.updatePieces(window, board);
                     std::cout << "Engine move made" << std::endl;
+
                     isPlayerTurn = true;
-                    dupBoard = board;
-                    // Restart pondering after engine move
-                    if (ponderingOn) updatePonderingThread(board, dupBoard);
+
+                    // If you want pondering back: you’d need a separate Engine instance in a worker thread,
+                    // plus a safe way to stop it and to share its “best line” (not just TT) with the main engine.
+                    (void)ponderingOn;
                 }
 
                 window.clear();
                 display.draw(window);
                 window.display();
             }
-
-            if (ponderingOn) stopPonderingThread(ponderingThread, board, dupBoard);
         }
     }
 }
