@@ -16,23 +16,26 @@ const Move NO_MOVE;
 constexpr Bitboard NOT_A_FILE = 0x7F7F7F7F7F7F7F7FULL;
 constexpr Bitboard NOT_H_FILE = 0xFEFEFEFEFEFEFEFEULL;
 
-std::string numToBoardPosition(int num) {
-    // Ensure the number is within valid range
-    if (num < 0 || num > 63) {
-        return "Invalid num";
-    }
+enum DirIndex : int {
+    DIR_N  = 0,  // +8
+    DIR_S  = 1,  // -8
+    DIR_E  = 2,  // +1
+    DIR_W  = 3,  // -1
+    DIR_NE = 4,  // +9
+    DIR_NW = 5,  // +7
+    DIR_SE = 6,  // -7
+    DIR_SW = 7   // -9
+};
 
-    // Calculate the rank and file
-    int rank = num / 8;
-    int file = num % 8;
+static constexpr int DIR_DELTA[8] = { 8, -8, 1, -1, 9, 7, -7, -9 };
 
-    // Convert rank and file to chess notation
-    char rankChar = '1' + rank;
-    char fileChar = 'h' - file;
+alignas(64) static Bitboard KNIGHT_ATTACKS[64];
+alignas(64) static Bitboard KING_ATTACKS[64];
+// Squares where an attacker pawn must sit to attack TARGET square.
+// index 0 = attackers are WHITE, index 1 = attackers are BLACK (matches your "attackersAreWhite" bool)
+alignas(64) static Bitboard PAWN_ATTACKERS[2][64];
 
-    // Return the board position as a string
-    return std::string(1, fileChar) + rankChar;
-}
+alignas(64) static Bitboard RAY[8][64]; // squares outward from sq in that dir (excluding sq)
 
 static inline int lsb_index(Bitboard b) {
     unsigned long idx;
@@ -53,6 +56,190 @@ static inline int pop_lsb(Bitboard& b) {
     return (int)idx;
 }
 
+static inline bool step_ok_noinline(int from, int dir, int& to) {
+    to = from + dir;
+    if (to < 0 || to >= 64) return false;
+
+    // Match your rook wrap logic
+    if (dir == 1  && (to % 8 == 0)) return false;
+    if (dir == -1 && (to % 8 == 7)) return false;
+
+    // Match your bishop wrap logic
+    if ((to % 8 == 0 && (dir == 9 || dir == -7)) ||
+        (to % 8 == 7 && (dir == 7 || dir == -9)))
+        return false;
+
+    return true;
+}
+
+static void init_attack_tables() {
+    // clear
+    for (int i = 0; i < 64; ++i) {
+        KNIGHT_ATTACKS[i] = 0;
+        KING_ATTACKS[i] = 0;
+        PAWN_ATTACKERS[0][i] = 0;
+        PAWN_ATTACKERS[1][i] = 0;
+        for (int d = 0; d < 8; ++d) RAY[d][i] = 0;
+    }
+
+    // rays
+    for (int sq = 0; sq < 64; ++sq) {
+        for (int d = 0; d < 8; ++d) {
+            int cur = sq;
+            int t;
+            while (step_ok_noinline(cur, DIR_DELTA[d], t)) {
+                RAY[d][sq] |= (1ULL << t);
+                cur = t;
+            }
+        }
+    }
+
+    // knight / king (use the exact checks you already rely on: abs(file diff) cap)
+    {
+        static constexpr int kSteps[8]  = { 17, 15, 10, 6, -17, -15, -10, -6 };
+        static constexpr int kiSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
+
+        for (int sq = 0; sq < 64; ++sq) {
+            for (int s : kSteps) {
+                int to = sq + s;
+                if (to >= 0 && to < 64 && std::abs((sq % 8) - (to % 8)) <= 2) {
+                    KNIGHT_ATTACKS[sq] |= (1ULL << to);
+                }
+            }
+            for (int s : kiSteps) {
+                int to = sq + s;
+                if (to >= 0 && to < 64 && std::abs((sq % 8) - (to % 8)) <= 1) {
+                    KING_ATTACKS[sq] |= (1ULL << to);
+                }
+            }
+        }
+    }
+
+    // pawn attackers (invert your existing pawn-attack masking rules)
+    for (int target = 0; target < 64; ++target) {
+        const Bitboard tMask = 1ULL << target;
+
+        // attackersAreWhite == true: pawns attack via +7 and +9, and you mask the RESULT with NOT_A_FILE / NOT_H_FILE
+        // So target must survive that mask for the attack to be valid.
+        if (target - 7 >= 0 && (tMask & NOT_A_FILE)) PAWN_ATTACKERS[0][target] |= (1ULL << (target - 7));
+        if (target - 9 >= 0 && (tMask & NOT_H_FILE)) PAWN_ATTACKERS[0][target] |= (1ULL << (target - 9));
+
+        // attackersAreWhite == false (black): you use >>7 masked with NOT_H_FILE, and >>9 masked with NOT_A_FILE
+        if (target + 7 < 64 && (tMask & NOT_H_FILE)) PAWN_ATTACKERS[1][target] |= (1ULL << (target + 7));
+        if (target + 9 < 64 && (tMask & NOT_A_FILE)) PAWN_ATTACKERS[1][target] |= (1ULL << (target + 9));
+    }
+}
+
+static inline void init_attack_tables_once() {
+    static bool inited = false;
+    if (!inited) {
+        init_attack_tables();
+        inited = true;
+    }
+}
+
+static inline int first_blocker_sq(Bitboard blockers, int dirDelta) {
+    // all your +delta dirs increase square index; -delta dirs decrease
+    return (dirDelta > 0) ? lsb_index(blockers) : msb_index(blockers);
+}
+
+static inline Bitboard rook_attacks_ray(int from, Bitboard occ) {
+    Bitboard a = 0;
+
+    // N,S,E,W
+    const int dirs[4] = { DIR_N, DIR_S, DIR_E, DIR_W };
+    for (int di : dirs) {
+        Bitboard ray = RAY[di][from];
+        Bitboard blockers = ray & occ;
+        if (blockers) {
+            int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
+            a |= (ray & ~RAY[di][bSq]); // up to + incl blocker
+        } else {
+            a |= ray;
+        }
+    }
+    return a;
+}
+
+static inline Bitboard bishop_attacks_ray(int from, Bitboard occ) {
+    Bitboard a = 0;
+
+    // NE,NW,SE,SW
+    const int dirs[4] = { DIR_NE, DIR_NW, DIR_SE, DIR_SW };
+    for (int di : dirs) {
+        Bitboard ray = RAY[di][from];
+        Bitboard blockers = ray & occ;
+        if (blockers) {
+            int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
+            a |= (ray & ~RAY[di][bSq]);
+        } else {
+            a |= ray;
+        }
+    }
+    return a;
+}
+
+static inline bool isSquareAttacked_fast(int targetSquare, bool attackersAreWhite, Bitboard occupiedSquares, Bitboard attackerPawns, Bitboard attackerKnights, Bitboard attackerBishops, Bitboard attackerRooks, Bitboard attackerQueens, Bitboard attackerKing) {
+    init_attack_tables_once();
+
+    const int pawnIdx = attackersAreWhite ? 0 : 1;
+
+    // pawn attackers (no shifting)
+    if (attackerPawns & PAWN_ATTACKERS[pawnIdx][targetSquare]) return true;
+
+    // knight / king (symmetry lets us use targetSquare table directly)
+    if (attackerKnights & KNIGHT_ATTACKS[targetSquare]) return true;
+    if (attackerKing & KING_ATTACKS[targetSquare]) return true;
+
+    // sliding: ray + first blocker
+    const Bitboard rookQueen = attackerRooks | attackerQueens;
+    const Bitboard bishQueen = attackerBishops | attackerQueens;
+
+    // diagonals
+    {
+        const int dirs[4] = { DIR_NE, DIR_NW, DIR_SE, DIR_SW };
+        for (int di : dirs) {
+            Bitboard ray = RAY[di][targetSquare];
+            Bitboard blockers = ray & occupiedSquares;
+            if (!blockers) continue;
+            int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
+            if (bishQueen & (1ULL << bSq)) return true;
+        }
+    }
+
+    // orthogonals
+    {
+        const int dirs[4] = { DIR_N, DIR_S, DIR_E, DIR_W };
+        for (int di : dirs) {
+            Bitboard ray = RAY[di][targetSquare];
+            Bitboard blockers = ray & occupiedSquares;
+            if (!blockers) continue;
+            int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
+            if (rookQueen & (1ULL << bSq)) return true;
+        }
+    }
+
+    return false;
+}
+
+std::string numToBoardPosition(int num) {
+    // Ensure the number is within valid range
+    if (num < 0 || num > 63) {
+        return "Invalid num";
+    }
+
+    // Calculate the rank and file
+    int rank = num / 8;
+    int file = num % 8;
+
+    // Convert rank and file to chess notation
+    char rankChar = '1' + rank;
+    char fileChar = 'h' - file;
+
+    // Return the board position as a string
+    return std::string(1, fileChar) + rankChar;
+}
+
 static inline bool step_ok(int from, int dir, int& to) {
     to = from + dir;
     if (to < 0 || to >= 64) return false;
@@ -70,12 +257,14 @@ static inline bool step_ok(int from, int dir, int& to) {
 }
 
 Bitboard Board::computePinnedMask(bool forWhite) const {
+    init_attack_tables_once();
+
     const Bitboard ownPieces   = forWhite ? whitePieces : blackPieces;
     const Bitboard enemyPieces = forWhite ? blackPieces : whitePieces;
     const Bitboard occ = ownPieces | enemyPieces;
 
     const Bitboard kingBB = forWhite ? whiteKing : blackKing;
-    if (!kingBB) return 0; // safety
+    if (!kingBB) return 0;
 
     const int kingSq = lsb_index(kingBB);
 
@@ -86,55 +275,33 @@ Bitboard Board::computePinnedMask(bool forWhite) const {
 
     Bitboard pinned = 0;
 
-    auto scan_dir = [&](int dir, Bitboard enemySliders) {
-        int sq = kingSq;
+    for (int di = 0; di < 8; ++di) {
+        const bool diag = (di == DIR_NE || di == DIR_NW || di == DIR_SE || di == DIR_SW);
+        const Bitboard sliders = diag ? enemyBishQ : enemyRookQ;
 
-        // 1) find first blocker
-        int t;
-        while (step_ok(sq, dir, t)) {
-            const Bitboard tMask = 1ULL << t;
-            if (occ & tMask) {
-                // first blocker must be OUR piece
-                if (!(ownPieces & tMask)) return;
+        Bitboard ray1 = RAY[di][kingSq];
+        Bitboard blockers1 = ray1 & occ;
+        if (!blockers1) continue;
 
-                const int candidateSq = t;
+        const int b1Sq = first_blocker_sq(blockers1, DIR_DELTA[di]);
+        const Bitboard b1Mask = 1ULL << b1Sq;
+        if (!(ownPieces & b1Mask)) continue; // first blocker must be ours
 
-                // 2) find second blocker beyond candidate
-                sq = candidateSq;
-                int t2;
-                while (step_ok(sq, dir, t2)) {
-                    const Bitboard t2Mask = 1ULL << t2;
-                    if (occ & t2Mask) {
-                        // if second blocker is an enemy slider → candidate is pinned
-                        if (enemySliders & t2Mask) {
-                            pinned |= (1ULL << candidateSq);
-                        }
-                        return;
-                    }
-                    sq = t2;
-                }
-                return;
-            }
-            sq = t;
-        }
-    };
+        Bitboard ray2 = RAY[di][b1Sq];
+        Bitboard blockers2 = ray2 & occ;
+        if (!blockers2) continue;
 
-    // Orthogonal rays: rook/queen pins
-    scan_dir( 8, enemyRookQ);
-    scan_dir(-8, enemyRookQ);
-    scan_dir( 1, enemyRookQ);
-    scan_dir(-1, enemyRookQ);
+        const int b2Sq = first_blocker_sq(blockers2, DIR_DELTA[di]);
+        const Bitboard b2Mask = 1ULL << b2Sq;
 
-    // Diagonal rays: bishop/queen pins
-    scan_dir( 9, enemyBishQ);
-    scan_dir( 7, enemyBishQ);
-    scan_dir(-9, enemyBishQ);
-    scan_dir(-7, enemyBishQ);
+        if (sliders & b2Mask) pinned |= b1Mask;
+    }
 
     return pinned;
 }
 
 Board::Board() {
+    init_attack_tables_once();
     initializeZobristTable();
     createBoard();
     resize_tt(64);  // Calls the resize function to allocate memory
@@ -436,87 +603,77 @@ void Board::generatePawnMoves(MoveList& moves, Bitboard pawns, Bitboard ownPiece
 }
 
 void Board::generateBishopMoves(MoveList& moves, Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces) {
-    Bitboard occupiedSquares = ownPieces | opponentPieces;
-    const int directions[4] = { 9, 7, -9, -7 };
+    init_attack_tables_once();
+
+    const Bitboard occupied = ownPieces | opponentPieces;
 
     while (bishops) {
-        int from = pop_lsb(bishops);
+        const int from = pop_lsb(bishops);
 
-        for (int dir : directions) {
-            int to = from;
-            while (true) {
-                to += dir;
-                if (to < 0 || to >= 64 || (to % 8 == 0 && dir == 9) || (to % 8 == 7 && dir == 7) ||
-                    (to % 8 == 0 && dir == -7) || (to % 8 == 7 && dir == -9)) break;
+        Bitboard targets = bishop_attacks_ray(from, occupied) & ~ownPieces;
 
-                if (occupiedSquares & (1ULL << to)) {
-                    if (opponentPieces & (1ULL << to)) {
-                        Move move(from, to);
-                        move.isCapture = true;
-                        moves.push(move);
-                    }
-                    break;
-                }
-                else {
-                    moves.push(Move(from, to));
-                }
-            }
+        Bitboard captures = targets & opponentPieces;
+        Bitboard quiets   = targets & ~opponentPieces;
+
+        while (quiets) {
+            int to = pop_lsb(quiets);
+            moves.push(Move(from, to));
+        }
+        while (captures) {
+            int to = pop_lsb(captures);
+            Move m(from, to);
+            m.isCapture = true;
+            moves.push(m);
         }
     }
 }
 
 void Board::generateRookMoves(MoveList& moves, Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces) {
-    Bitboard occupiedSquares = ownPieces | opponentPieces;
-    const int directions[4] = { 8, -8, 1, -1 };
+    init_attack_tables_once();
+
+    const Bitboard occupied = ownPieces | opponentPieces;
+
     while (rooks) {
-        int from = pop_lsb(rooks);
+        const int from = pop_lsb(rooks);
 
-        for (int dir : directions) {
-            int to = from;
-            while (true) {
-                to += dir;
+        Bitboard targets = rook_attacks_ray(from, occupied) & ~ownPieces;
 
-                // Prevent the rook from wrapping around the board edges
-                if (to < 0 || to >= 64 ||
-                    (dir == 1 && (to % 8 == 0)) ||
-                    (dir == -1 && (to % 8 == 7))) break;
+        Bitboard captures = targets & opponentPieces;
+        Bitboard quiets   = targets & ~opponentPieces;
 
-                if (occupiedSquares & (1ULL << to)) {
-                    if (opponentPieces & (1ULL << to)) {
-                        Move move(from, to);
-                        move.isCapture = true;
-                        moves.push(move);
-                    }
-                    break;
-                }
-                else {
-                    moves.push(Move(from, to));
-                }
-            }
+        while (quiets) {
+            int to = pop_lsb(quiets);
+            moves.push(Move(from, to));
+        }
+        while (captures) {
+            int to = pop_lsb(captures);
+            Move m(from, to);
+            m.isCapture = true;
+            moves.push(m);
         }
     }
 }
 
 void Board::generateKnightMoves(MoveList& moves, Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces) {
-    const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
+    init_attack_tables_once();
 
     while (knights) {
-        int from = pop_lsb(knights);
+        const int from = pop_lsb(knights);
 
-        for (int move : knightMoves) {
-            int to = from + move;
-            if (to < 0 || to >= 64 || (abs(from % 8 - to % 8) > 2)) continue;
+        Bitboard targets = KNIGHT_ATTACKS[from] & ~ownPieces;
 
-            if (!(ownPieces & (1ULL << to))) {
-                if (opponentPieces & (1ULL << to)) {
-                    Move move(from, to);
-                    move.isCapture = true;
-                    moves.push(move);
-                }
-                else {
-                    moves.push(Move(from, to));
-                }
-            }
+        Bitboard captures = targets & opponentPieces;
+        Bitboard quiets   = targets & ~opponentPieces;
+
+        while (quiets) {
+            int to = pop_lsb(quiets);
+            moves.push(Move(from, to));
+        }
+        while (captures) {
+            int to = pop_lsb(captures);
+            Move m(from, to);
+            m.isCapture = true;
+            moves.push(m);
         }
     }
 }
@@ -578,7 +735,7 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
         }
 
         // King can't move into check
-        if (isSquareAttacked(
+        if (isSquareAttacked_fast(
                 kingToSquare,
                 attackersAreWhite,
                 occupiedAfterKingMove,
@@ -597,8 +754,7 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
 
     // Castling: not currently in check, squares between empty, and BOTH crossed squares not attacked.
     const bool kingCurrentlyInCheck =
-        isSquareAttacked(kingFromSquare, attackersAreWhite, allOccupied,
-                         attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing);
+        isSquareAttacked_fast(kingFromSquare, attackersAreWhite, allOccupied, attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing);
 
     if (!kingCurrentlyInCheck) {
         if (whiteToMove) {
@@ -606,9 +762,9 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!whiteKingMoved && !whiteRRookMoved && (whiteRooks & 0x0000000000000001ULL)) {
                 const Bitboard emptyBetweenMask = 0x0000000000000006ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
+                    if (!isSquareAttacked_fast(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
+                        !isSquareAttacked_fast(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
                         moves.push(Move(kingFromSquare, kingFromSquare - 2));
                     }
@@ -619,9 +775,9 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!whiteKingMoved && !whiteLRookMoved && (whiteRooks & 0x0000000000000080ULL)) {
                 const Bitboard emptyBetweenMask = 0x0000000000000070ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
+                    if (!isSquareAttacked_fast(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
+                        !isSquareAttacked_fast(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
                         moves.push(Move(kingFromSquare, kingFromSquare + 2));
                     }
@@ -632,9 +788,9 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!blackKingMoved && !blackRRookMoved && (blackRooks & 0x0100000000000000ULL)) {
                 const Bitboard emptyBetweenMask = 0x0600000000000000ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
+                    if (!isSquareAttacked_fast(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
+                        !isSquareAttacked_fast(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
                         moves.push(Move(kingFromSquare, kingFromSquare - 2));
                     }
@@ -645,9 +801,9 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!blackKingMoved && !blackLRookMoved && (blackRooks & 0x8000000000000000ULL)) {
                 const Bitboard emptyBetweenMask = 0x7000000000000000ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
+                    if (!isSquareAttacked_fast(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
+                        !isSquareAttacked_fast(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
                         moves.push(Move(kingFromSquare, kingFromSquare + 2));
                     }
@@ -718,72 +874,33 @@ void Board::generateAllMoves(MoveList& legalMoves) {
 }
 
 bool Board::amIInCheck(bool player) {
-    Bitboard ownKing = player ? whiteKing : blackKing;
-    Bitboard opponentBishops = player ? blackBishops : whiteBishops;
-    Bitboard opponentQueens = player ? blackQueens : whiteQueens;
-    Bitboard opponentKing = player ? blackKing : whiteKing;
-    Bitboard ownPieces = player ? whitePieces : blackPieces;
-    Bitboard enemyPieces = player ? blackPieces : whitePieces;
+    init_attack_tables_once();
 
-    int kingPos = lsb_index(ownKing);
+    const Bitboard ownKing = player ? whiteKing : blackKing;
+    const int kingPos = lsb_index(ownKing);
 
-    // Check for bishop/queen diagonal attacks
-    const int bishopDirections[4] = { 9, 7, -9, -7 };
-    for (int dir : bishopDirections) {
-        int to = kingPos;
-        while (true) {
-            to += dir;
-            if (to < 0 || to >= 64 || (to % 8 == 0 && (dir == 9 || dir == -7)) || (to % 8 == 7 && (dir == 7 || dir == -9))) break;
-            Bitboard posMask = 1ULL << to;
-            if (opponentBishops & posMask || opponentQueens & posMask) return true;
-            if (ownPieces & posMask || enemyPieces & posMask) break;
-        }
-    }
+    const bool attackersAreWhite = !player;
 
-    // Check for rook/queen straight attacks
-    Bitboard opponentRooks = player ? blackRooks : whiteRooks;
-    const int rookDirections[4] = { 8, -8, 1, -1 };
-    for (int dir : rookDirections) {
-        int to = kingPos;
-        while (true) {
-            to += dir;
-            if (to < 0 || to >= 64 || (to % 8 == 0 && dir == 1) || (to % 8 == 7 && dir == -1)) break;
-            Bitboard posMask = 1ULL << to;
-            if (opponentRooks & posMask || opponentQueens & posMask) return true;
-            if (ownPieces & posMask || enemyPieces & posMask)  break;
-        }
-    }
+    const Bitboard occ = whitePieces | blackPieces;
 
-    // Check for pawn attacks
-    Bitboard opponentPawns = player ? blackPawns : whitePawns;
-    Bitboard pawnAttacks = player ? ((opponentPawns >> 7) & NOT_H_FILE) | ((opponentPawns >> 9) & NOT_A_FILE)
-        : ((opponentPawns << 7) & NOT_A_FILE) | ((opponentPawns << 9) & NOT_H_FILE);
+    const Bitboard attackerPawns   = attackersAreWhite ? whitePawns   : blackPawns;
+    const Bitboard attackerKnights = attackersAreWhite ? whiteKnights : blackKnights;
+    const Bitboard attackerBishops = attackersAreWhite ? whiteBishops : blackBishops;
+    const Bitboard attackerRooks   = attackersAreWhite ? whiteRooks   : blackRooks;
+    const Bitboard attackerQueens  = attackersAreWhite ? whiteQueens  : blackQueens;
+    const Bitboard attackerKing    = attackersAreWhite ? whiteKing    : blackKing;
 
-
-    if (pawnAttacks & ownKing) {
-        return true;
-    }
-
-    // Check for knight attacks
-    const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
-    Bitboard opponentKnights = player ? blackKnights : whiteKnights;
-    for (int move : knightMoves) {
-        int to = kingPos + move;
-        if (to >= 0 && to < 64 && abs((kingPos % 8) - (to % 8)) <= 2) {
-            if (opponentKnights & (1ULL << to)) return true;
-        }
-    }
-
-    // Check for king attacks
-    const int kingMoves[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
-    for (int move : kingMoves) {
-        int to = kingPos + move;
-        if (to >= 0 && to < 64 && abs((kingPos % 8) - (to % 8)) <= 1) {
-            if (opponentKing & (1ULL << to)) return true;
-        }
-    }
-
-    return false;
+    return isSquareAttacked_fast(
+        kingPos,
+        attackersAreWhite,
+        occ,
+        attackerPawns,
+        attackerKnights,
+        attackerBishops,
+        attackerRooks,
+        attackerQueens,
+        attackerKing
+    );
 }
 
 void Board::makeNullMove(Undo& u) {
