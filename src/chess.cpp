@@ -34,19 +34,112 @@ std::string numToBoardPosition(int num) {
     return std::string(1, fileChar) + rankChar;
 }
 
-unsigned int ctzll(unsigned long long x) {
-    unsigned long index; // Variable to store the result
-    // _BitScanForward64 returns 0 if x is zero, so handle this case:
-    if (_BitScanForward64(&index, x))
-        return index;
-    else
-        return 64; // Define behavior for x == 0
+static inline int lsb_index(Bitboard b) {
+    unsigned long idx;
+    _BitScanForward64(&idx, b);
+    return (int)idx;
 }
+
+static inline int msb_index(Bitboard b) {
+    unsigned long idx;
+    _BitScanReverse64(&idx, b);
+    return (int)idx;
+}
+
+static inline int pop_lsb(Bitboard& b) {
+    unsigned long idx;
+    _BitScanForward64(&idx, b);
+    b &= (b - 1);
+    return (int)idx;
+}
+
+static inline bool step_ok(int from, int dir, int& to) {
+    to = from + dir;
+    if (to < 0 || to >= 64) return false;
+
+    // Match YOUR rook wrap logic
+    if (dir == 1  && (to % 8 == 0)) return false;
+    if (dir == -1 && (to % 8 == 7)) return false;
+
+    // Match YOUR bishop wrap logic (as used in generateBishopMoves)
+    if ((to % 8 == 0 && (dir == 9 || dir == -7)) ||
+        (to % 8 == 7 && (dir == 7 || dir == -9)))
+        return false;
+
+    return true;
+}
+
+Bitboard Board::computePinnedMask(bool forWhite) const {
+    const Bitboard ownPieces   = forWhite ? whitePieces : blackPieces;
+    const Bitboard enemyPieces = forWhite ? blackPieces : whitePieces;
+    const Bitboard occ = ownPieces | enemyPieces;
+
+    const Bitboard kingBB = forWhite ? whiteKing : blackKing;
+    if (!kingBB) return 0; // safety
+
+    const int kingSq = lsb_index(kingBB);
+
+    const Bitboard enemyRookQ = forWhite ? (blackRooks   | blackQueens)
+                                         : (whiteRooks   | whiteQueens);
+    const Bitboard enemyBishQ = forWhite ? (blackBishops | blackQueens)
+                                         : (whiteBishops | whiteQueens);
+
+    Bitboard pinned = 0;
+
+    auto scan_dir = [&](int dir, Bitboard enemySliders) {
+        int sq = kingSq;
+
+        // 1) find first blocker
+        int t;
+        while (step_ok(sq, dir, t)) {
+            const Bitboard tMask = 1ULL << t;
+            if (occ & tMask) {
+                // first blocker must be OUR piece
+                if (!(ownPieces & tMask)) return;
+
+                const int candidateSq = t;
+
+                // 2) find second blocker beyond candidate
+                sq = candidateSq;
+                int t2;
+                while (step_ok(sq, dir, t2)) {
+                    const Bitboard t2Mask = 1ULL << t2;
+                    if (occ & t2Mask) {
+                        // if second blocker is an enemy slider → candidate is pinned
+                        if (enemySliders & t2Mask) {
+                            pinned |= (1ULL << candidateSq);
+                        }
+                        return;
+                    }
+                    sq = t2;
+                }
+                return;
+            }
+            sq = t;
+        }
+    };
+
+    // Orthogonal rays: rook/queen pins
+    scan_dir( 8, enemyRookQ);
+    scan_dir(-8, enemyRookQ);
+    scan_dir( 1, enemyRookQ);
+    scan_dir(-1, enemyRookQ);
+
+    // Diagonal rays: bishop/queen pins
+    scan_dir( 9, enemyBishQ);
+    scan_dir( 7, enemyBishQ);
+    scan_dir(-9, enemyBishQ);
+    scan_dir(-7, enemyBishQ);
+
+    return pinned;
+}
+
+
 
 // Constructor to initialize the board
 Board::Board() {
-    createBoard();
     initializeZobristTable();
+    createBoard();
     resize_tt(64);  // Calls the resize function to allocate memory
     clear_tt();     // Clear the table to reset all entries
     loadOpeningBook();
@@ -70,8 +163,10 @@ void Board::createBoard() {
     whiteKing = 0x0000000000000008ULL;
     blackKing = 0x0800000000000000ULL;
     enPassantTarget = 0x0ULL;
+
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
+
     whiteToMove = true;
 
     whiteKingMoved = false;
@@ -81,13 +176,19 @@ void Board::createBoard() {
     blackLRookMoved = false;
     blackRRookMoved = false;
 
+    // compute once
+    zobristHash = generateZobristHash();
+
     positionHistory.clear();
     updatePositionHistory(true);   // count the initial position as occurrence #1
 }
 
 void Board::createBoardFromFEN(const std::string& fen) {
     parseFEN(fen, *this);
+
+    zobristHash = generateZobristHash();
     positionHistory.clear();
+
     updatePositionHistory(true);
 }
 
@@ -150,10 +251,12 @@ void Board::printBoard() {
     if (castlingRights.empty()) castlingRights = "-";
 
     // En Passant target
-    int epIndex = ctzll(enPassantTarget); // using GCC built-in function to find the index of the lowest set bit
     std::string enPassant = "-";
-    if (enPassantTarget != 0 && epIndex >= 16 && epIndex <= 55) { // Valid en passant ranks
-        enPassant = numToBoardPosition(epIndex);
+    if (enPassantTarget) {
+        int epIndex = lsb_index(enPassantTarget);
+        if (epIndex >= 16 && epIndex <= 55) {
+            enPassant = numToBoardPosition(epIndex);
+        }
     }
 
     // Determine who's move it is
@@ -229,9 +332,7 @@ static inline bool isSquareAttacked(int targetSquare, bool attackersAreWhite, Bi
     return false;
 }
 
-std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces) {
-    std::vector<Move> moves;
-    moves.reserve(64);
+void Board::generatePawnMoves(MoveList& moves, Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces) {
     Bitboard emptySquares = ~(ownPieces | opponentPieces);
     Bitboard promotionRank = whiteToMove ? 0xFF00000000000000ULL : 0x00000000000000FFULL;
 
@@ -239,17 +340,17 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
     Bitboard singlePush = whiteToMove ? (pawns << 8) & emptySquares : (pawns >> 8) & emptySquares;
     Bitboard singlePushMask = singlePush;
     while (singlePushMask) {
-        int to = ctzll(singlePushMask);
+        int to = pop_lsb(singlePushMask);
         int from = whiteToMove ? to - 8 : to + 8;
-        singlePushMask &= singlePushMask - 1;
+
         if ((1ULL << to) & promotionRank) {
-            moves.emplace_back(from, to, 'q');
-            moves.emplace_back(from, to, 'r');
-            moves.emplace_back(from, to, 'b');
-            moves.emplace_back(from, to, 'n');
+            moves.push(Move(from, to, 'q'));
+            moves.push(Move(from, to, 'r'));
+            moves.push(Move(from, to, 'b'));
+            moves.push(Move(from, to, 'n'));
         }
         else {
-            moves.emplace_back(from, to);
+            moves.push(Move(from, to));
         }
     }
 
@@ -259,10 +360,9 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
         : ((pawns & startRankMask) >> 16) & (emptySquares >> 8) & emptySquares;
     Bitboard doublePushMask = doublePush;
     while (doublePushMask) {
-        int to = ctzll(doublePushMask);
+        int to = pop_lsb(doublePushMask);
         int from = whiteToMove ? to - 16 : to + 16;
-        doublePushMask &= doublePushMask - 1;
-        moves.emplace_back(from, to);
+        moves.push(Move(from, to));
     }
 
     // Pawn captures
@@ -272,44 +372,44 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
         : (pawns >> 7) & opponentPieces & NOT_H_FILE;
     int from;
     while (leftCaptures) {
-        int to = ctzll(leftCaptures);
+        int to = pop_lsb(leftCaptures);
         from = whiteToMove ? to - 9 : to + 9;
-        leftCaptures &= leftCaptures - 1;
+
         Move move(from, to);
         move.isCapture = true;
         if ((1ULL << to) & promotionRank) {
             move.promotion = 'q';
-            moves.push_back(move);
+            moves.push(Move(move));
             move.promotion = 'r';
-            moves.push_back(move);
+            moves.push(Move(move));
             move.promotion = 'b';
-            moves.push_back(move);
+            moves.push(Move(move));
             move.promotion = 'n';
-            moves.push_back(move);
+            moves.push(Move(move));
         }
         else {
-            moves.push_back(move);
+            moves.push(Move(move));
         }
     }
 
     while (rightCaptures) {
-        int to = ctzll(rightCaptures);
+        int to = pop_lsb(rightCaptures);
         from = whiteToMove ? to - 7 : to + 7;
-        rightCaptures &= rightCaptures - 1;
+
         Move move(from, to);
         move.isCapture = true;
         if ((1ULL << to) & promotionRank) {
             move.promotion = 'q';
-            moves.push_back(move);
+            moves.push(move);
             move.promotion = 'r';
-            moves.push_back(move);
+            moves.push(move);
             move.promotion = 'b';
-            moves.push_back(move);
+            moves.push(move);
             move.promotion = 'n';
-            moves.push_back(move);
+            moves.push(move);
         }
         else {
-            moves.push_back(move);
+            moves.push(move);
         }
     }
 
@@ -320,34 +420,30 @@ std::vector<Move> Board::generatePawnMoves(Bitboard pawns, Bitboard ownPieces, B
         : (pawns >> 7) & enPassantTarget & NOT_H_FILE;
    
     while (leftPassant) {
-        int to = ctzll(leftPassant);
+        int to = pop_lsb(leftPassant);
         from = whiteToMove ? to - 9 : to + 9;
-        leftPassant &= leftPassant - 1;
+
         Move move(from, to);
         move.isCapture = true;
-        moves.push_back(move);
+        moves.push(move);
     }
 
     while (rightPassant) {
-        int to = ctzll(rightPassant);
+        int to = pop_lsb(rightPassant);
         from = whiteToMove ? to - 7 : to + 7;
-        rightPassant &= rightPassant - 1;
+
         Move move(from, to);
         move.isCapture = true;
-        moves.push_back(move);
+        moves.push(move);
     } 
-    return moves;
 }
 
-std::vector<Move> Board::generateBishopMoves(Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces) {
-    std::vector<Move> moves;
-    moves.reserve(32);
+void Board::generateBishopMoves(MoveList& moves, Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces) {
     Bitboard occupiedSquares = ownPieces | opponentPieces;
     const int directions[4] = { 9, 7, -9, -7 };
 
     while (bishops) {
-        int from = ctzll(bishops);
-        bishops &= bishops - 1;
+        int from = pop_lsb(bishops);
 
         for (int dir : directions) {
             int to = from;
@@ -360,27 +456,24 @@ std::vector<Move> Board::generateBishopMoves(Bitboard bishops, Bitboard ownPiece
                     if (opponentPieces & (1ULL << to)) {
                         Move move(from, to);
                         move.isCapture = true;
-                        moves.push_back(move);
+                        moves.push(move);
                     }
                     break;
                 }
                 else {
-                    moves.emplace_back(from, to);
+                    moves.push(Move(from, to));
                 }
             }
         }
     }
-    return moves;
 }
 
-std::vector<Move> Board::generateRookMoves(Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces) {
-    std::vector<Move> moves;
-    moves.reserve(64);
+void Board::generateRookMoves(MoveList& moves, Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces) {
     Bitboard occupiedSquares = ownPieces | opponentPieces;
     const int directions[4] = { 8, -8, 1, -1 };
     while (rooks) {
-        int from = ctzll(rooks);
-        rooks &= rooks - 1;
+        int from = pop_lsb(rooks);
+
         for (int dir : directions) {
             int to = from;
             while (true) {
@@ -395,27 +488,23 @@ std::vector<Move> Board::generateRookMoves(Bitboard rooks, Bitboard ownPieces, B
                     if (opponentPieces & (1ULL << to)) {
                         Move move(from, to);
                         move.isCapture = true;
-                        moves.push_back(move);
+                        moves.push(move);
                     }
                     break;
                 }
                 else {
-                    moves.emplace_back(from, to);
+                    moves.push(Move(from, to));
                 }
             }
         }
     }
-    return moves;
 }
 
-std::vector<Move> Board::generateKnightMoves(Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces) {
-    std::vector<Move> moves;
-    moves.reserve(32);
+void Board::generateKnightMoves(MoveList& moves, Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces) {
     const int knightMoves[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
 
     while (knights) {
-        int from = ctzll(knights);
-        knights &= knights - 1;
+        int from = pop_lsb(knights);
 
         for (int move : knightMoves) {
             int to = from + move;
@@ -425,26 +514,20 @@ std::vector<Move> Board::generateKnightMoves(Bitboard knights, Bitboard ownPiece
                 if (opponentPieces & (1ULL << to)) {
                     Move move(from, to);
                     move.isCapture = true;
-                    moves.push_back(move);
+                    moves.push(move);
                 }
                 else {
-                    moves.emplace_back(from, to);
+                    moves.push(Move(from, to));
                 }
             }
         }
     }
-    return moves;
 }
 
-std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPieces, Bitboard opponentPieces) {
-    std::vector<Move> moves;
-    moves.reserve(16);
-
-    if (!kingBitboard) return moves;
-
+void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard ownPieces, Bitboard opponentPieces) {
     const int kingSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
 
-    const int kingFromSquare = ctzll(kingBitboard);
+    const int kingFromSquare = lsb_index(kingBitboard);
     const Bitboard kingFromMask = 1ULL << kingFromSquare;
 
     const Bitboard allOccupied = (ownPieces | opponentPieces);
@@ -512,7 +595,7 @@ std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPi
 
         Move m(kingFromSquare, kingToSquare);
         if (opponentPieces & kingToMask) m.isCapture = true;
-        moves.push_back(m);
+        moves.push(m);
     }
 
     // Castling: not currently in check, squares between empty, and BOTH crossed squares not attacked.
@@ -530,7 +613,7 @@ std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPi
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
                         !isSquareAttacked(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
-                        moves.emplace_back(kingFromSquare, kingFromSquare - 2);
+                        moves.push(Move(kingFromSquare, kingFromSquare - 2));
                     }
                 }
             }
@@ -543,7 +626,7 @@ std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPi
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
                         !isSquareAttacked(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
-                        moves.emplace_back(kingFromSquare, kingFromSquare + 2);
+                        moves.push(Move(kingFromSquare, kingFromSquare + 2));
                     }
                 }
             }
@@ -556,7 +639,7 @@ std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPi
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
                         !isSquareAttacked(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
-                        moves.emplace_back(kingFromSquare, kingFromSquare - 2);
+                        moves.push(Move(kingFromSquare, kingFromSquare - 2));
                     }
                 }
             }
@@ -569,100 +652,72 @@ std::vector<Move> Board::generateKingMoves(Bitboard kingBitboard, Bitboard ownPi
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
                         !isSquareAttacked(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
                                           attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
-                        moves.emplace_back(kingFromSquare, kingFromSquare + 2);
+                        moves.push(Move(kingFromSquare, kingFromSquare + 2));
                     }
                 }
             }
         }
     }
-    return moves;
 }
 
-std::vector<Move> Board::generateQueenMoves(Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces) {
-    std::vector<Move> moves;
-    moves.reserve(128);
-    std::vector<Move> bishopMoves = generateBishopMoves(queens, ownPieces, opponentPieces);
-    std::vector<Move> rookMoves = generateRookMoves(queens, ownPieces, opponentPieces);
-
-    moves.insert(moves.end(), bishopMoves.begin(), bishopMoves.end());
-    moves.insert(moves.end(), rookMoves.begin(), rookMoves.end());
-    return moves;
+void Board::generateQueenMoves(MoveList& moves, Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces) {
+    generateBishopMoves(moves, queens, ownPieces, opponentPieces);
+    generateRookMoves(moves, queens, ownPieces, opponentPieces);
 }
 
-bool contains(const std::vector<int>& vec, int value) {
-    return std::find(vec.begin(), vec.end(), value) != vec.end();
-}
-
-std::vector<Move> Board::generateAllMoves() {
-    std::vector<Move> allMoves;
-    allMoves.reserve(256);
+void Board::generateAllMoves(MoveList& legalMoves) {
+    legalMoves.clear();
 
     Bitboard ownPieces = whiteToMove ? whitePieces : blackPieces;
     Bitboard opponentPieces = whiteToMove ? blackPieces : whitePieces;
+    
+    MoveList allMoves;
+    generatePawnMoves(allMoves, whiteToMove ? whitePawns : blackPawns,  ownPieces, opponentPieces);
+    generateBishopMoves(allMoves, whiteToMove ? whiteBishops : blackBishops, ownPieces, opponentPieces);
+    generateRookMoves(allMoves, whiteToMove ? whiteRooks : blackRooks, ownPieces, opponentPieces);
+    generateKnightMoves(allMoves, whiteToMove ? whiteKnights : blackKnights, ownPieces, opponentPieces);
+    generateQueenMoves(allMoves, whiteToMove ? whiteQueens : blackQueens, ownPieces, opponentPieces);
 
-    std::vector<Move> pawnMoves   = generatePawnMoves(whiteToMove ? whitePawns   : blackPawns,   ownPieces, opponentPieces);
-    std::vector<Move> bishopMoves = generateBishopMoves(whiteToMove ? whiteBishops : blackBishops, ownPieces, opponentPieces);
-    std::vector<Move> rookMoves   = generateRookMoves(whiteToMove ? whiteRooks   : blackRooks,   ownPieces, opponentPieces);
-    std::vector<Move> knightMoves = generateKnightMoves(whiteToMove ? whiteKnights : blackKnights, ownPieces, opponentPieces);
-    std::vector<Move> kingMoves   = generateKingMoves(whiteToMove ? whiteKing    : blackKing,    ownPieces, opponentPieces);
-    std::vector<Move> queenMoves  = generateQueenMoves(whiteToMove ? whiteQueens : blackQueens,  ownPieces, opponentPieces);
+    MoveList kingMoves;
+    generateKingMoves(kingMoves, whiteToMove ? whiteKing : blackKing, ownPieces, opponentPieces);
 
-    allMoves.insert(allMoves.end(), pawnMoves.begin(), pawnMoves.end());
-    allMoves.insert(allMoves.end(), bishopMoves.begin(), bishopMoves.end());
-    allMoves.insert(allMoves.end(), rookMoves.begin(), rookMoves.end());
-    allMoves.insert(allMoves.end(), knightMoves.begin(), knightMoves.end());
-    allMoves.insert(allMoves.end(), queenMoves.begin(), queenMoves.end());
+    const bool currentlyInCheck = amIInCheck(whiteToMove);
+    const bool sideIsWhite = whiteToMove;
+    const Bitboard pinnedMask = computePinnedMask(sideIsWhite);
+    const Bitboard epStore = enPassantTarget;
 
-    Bitboard ownKing = whiteToMove ? whiteKing : blackKing;
+    // Filter pseudo -> legalOut (your same logic, but no vectors)
+    for (int i = 0; i < allMoves.size; ++i) {
+        Move mv = allMoves.m[i];
 
-    // Pieces that might be pinned are "key defenders"
-    std::vector<Move> kingMobileMoves = generateQueenMoves(ownKing, opponentPieces, ownPieces);
-    std::vector<int> keyDefenderCoords;
-    keyDefenderCoords.reserve(16);
-    for (Move& move : kingMobileMoves) {
-        if (move.isCapture) keyDefenderCoords.push_back(move.to);
-    }
-
-    std::vector<Move> legalMoves;
-    legalMoves.reserve(128);
-
-    Bitboard store = enPassantTarget;
-
-    bool currentlyInCheck = amIInCheck(whiteToMove);
-    bool sideToMoveIsWhite = whiteToMove; // capture current side (whiteToMove toggles in makeMove)
-
-    for (Move& move : allMoves) {
-        // Detect en passant moves so they ALWAYS get checked for legality
         bool isEnPassantMove = false;
-        if (store & (1ULL << move.to)) {
-            // EP target square matches destination, and the moving piece is a pawn moving diagonally
-            if (sideToMoveIsWhite) {
-                if ((whitePawns & (1ULL << move.from)) && (move.to == move.from + 7 || move.to == move.from + 9)) {
+        if (epStore & (1ULL << mv.to)) {
+            if (sideIsWhite) {
+                if ((whitePawns & (1ULL << mv.from)) && (mv.to == mv.from + 7 || mv.to == mv.from + 9))
                     isEnPassantMove = true;
-                }
             } else {
-                if ((blackPawns & (1ULL << move.from)) && (move.to == move.from - 7 || move.to == move.from - 9)) {
+                if ((blackPawns & (1ULL << mv.from)) && (mv.to == mv.from - 7 || mv.to == mv.from - 9))
                     isEnPassantMove = true;
-                }
             }
         }
 
-        // Fast-path: only allowed if NOT in check, NOT a key defender, AND NOT en passant
-        if (!currentlyInCheck && !isEnPassantMove && !contains(keyDefenderCoords, move.from)) {
-            legalMoves.push_back(move);
+        if (!currentlyInCheck && !isEnPassantMove && !(pinnedMask & (1ULL << mv.from))) {
+            legalMoves.push(mv);
             continue;
         }
+
         Undo u;
-        makeMoveFast(move, u);
+        makeMove(mv, u);
         if (!amIInCheck(!whiteToMove)) {
-            legalMoves.push_back(move);
+            legalMoves.push(mv);
         }
-        undoMoveFast(move, u);
+        undoMove(mv, u);
     }
 
-    // kingMoves already returned legal moves from generateKingMoves()
-    legalMoves.insert(legalMoves.end(), kingMoves.begin(), kingMoves.end());
-    return legalMoves;
+    // append king moves
+    for (int i = 0; i < kingMoves.size; ++i) {
+        legalMoves.push(kingMoves.m[i]);
+    }
 }
 
 bool Board::amIInCheck(bool player) {
@@ -673,7 +728,7 @@ bool Board::amIInCheck(bool player) {
     Bitboard ownPieces = player ? whitePieces : blackPieces;
     Bitboard enemyPieces = player ? blackPieces : whitePieces;
 
-    int kingPos = ctzll(ownKing);
+    int kingPos = lsb_index(ownKing);
 
     // Check for bishop/queen diagonal attacks
     const int bishopDirections[4] = { 9, 7, -9, -7 };
@@ -734,16 +789,6 @@ bool Board::amIInCheck(bool player) {
     return false;
 }
 
-void Board::makeMove(Move& move, Undo& u) {
-    makeMoveFast(move, u);
-    updatePositionHistory(true);
-}
-
-void Board::undoMove(const Move& move, const Undo& u) {
-    updatePositionHistory(false);
-    undoMoveFast(move, u);
-}
-
 void Board::makeNullMove(Undo& u) {
     // save state
     u.prevEnPassantTarget = enPassantTarget;
@@ -779,8 +824,10 @@ void Board::undoNullMove(const Undo& u) {
     blackRRookMoved = u.prevBlackRRookMoved;
 }
 
-void Board::makeMoveFast(Move& move, Undo& u) {
+void Board::makeMove(Move& move, Undo& u) {
     // ---- store undo state ----
+    u.prevHash = zobristHash;
+
     u.prevEnPassantTarget = enPassantTarget;
 
     u.prevWhiteKingMoved  = whiteKingMoved;
@@ -794,6 +841,12 @@ void Board::makeMoveFast(Move& move, Undo& u) {
     u.capturedPiece = 0;
     u.wasEnPassant  = false;
 
+    // ---- remove old EP from hash (EP is for 1 ply only) ----
+    if (enPassantTarget) {
+        int file = (lsb_index(enPassantTarget) & 7);
+        zobristHash ^= zobristEnPassant[file];
+    }
+
     // EP exists for ONE ply only
     enPassantTarget = 0;
 
@@ -803,7 +856,8 @@ void Board::makeMoveFast(Move& move, Undo& u) {
     if (whiteToMove) {
         // ---------------- WHITE MOVE ----------------
         if (whitePawns & fromMask) {
-            whitePawns ^= fromMask | toMask;
+            // pawn leaves from
+            zobristHash ^= zobristTable[getPieceIndex('p')][move.from];
 
             // double pawn push → create EP square
             if (move.to == move.from + 16)
@@ -811,44 +865,83 @@ void Board::makeMoveFast(Move& move, Undo& u) {
 
             // promotion
             if (move.promotion) {
-                whitePawns &= ~toMask;
+                // promoted piece arrives at to (white pieces are lowercase in your hash)
+                zobristHash ^= zobristTable[getPieceIndex(move.promotion)][move.to];
+
+                whitePawns ^= fromMask;      // remove pawn from from
+                // add promoted piece at to
                 switch (move.promotion) {
                     case 'q': whiteQueens  |= toMask; break;
                     case 'r': whiteRooks   |= toMask; break;
                     case 'b': whiteBishops |= toMask; break;
                     case 'n': whiteKnights |= toMask; break;
                 }
+            } else {
+                // pawn arrives at to
+                zobristHash ^= zobristTable[getPieceIndex('p')][move.to];
+                whitePawns ^= fromMask | toMask;
             }
         }
         else if (whiteRooks & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('r')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('r')][move.to];
+
             whiteRooks ^= fromMask | toMask;
             if (move.from == 0) whiteRRookMoved = true;
             if (move.from == 7) whiteLRookMoved = true;
         }
-        else if (whiteKnights & fromMask) whiteKnights ^= fromMask | toMask;
-        else if (whiteBishops & fromMask) whiteBishops ^= fromMask | toMask;
-        else if (whiteQueens  & fromMask) whiteQueens  ^= fromMask | toMask;
-        else if (whiteKing    & fromMask) {
+        else if (whiteKnights & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('n')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('n')][move.to];
+            whiteKnights ^= fromMask | toMask;
+        }
+        else if (whiteBishops & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('b')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('b')][move.to];
+            whiteBishops ^= fromMask | toMask;
+        }
+        else if (whiteQueens & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('q')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('q')][move.to];
+            whiteQueens ^= fromMask | toMask;
+        }
+        else if (whiteKing & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('k')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('k')][move.to];
+
             whiteKing ^= fromMask | toMask;
             whiteKingMoved = true;
 
-            // castling rook movement
-            if (move.to == move.from - 2)      whiteRooks ^= 0x0000000000000005ULL; // king-side
-            else if (move.to == move.from + 2) whiteRooks ^= 0x0000000000000090ULL; // queen-side
+            // castling rook movement (also update hash)
+            if (move.to == move.from - 2) {
+                // rook 0 -> 2  (mask 0x5)
+                zobristHash ^= zobristTable[getPieceIndex('r')][0];
+                zobristHash ^= zobristTable[getPieceIndex('r')][2];
+                whiteRooks ^= 0x0000000000000005ULL;
+            }
+            else if (move.to == move.from + 2) {
+                // rook 7 -> 4  (mask 0x90)
+                zobristHash ^= zobristTable[getPieceIndex('r')][7];
+                zobristHash ^= zobristTable[getPieceIndex('r')][4];
+                whiteRooks ^= 0x0000000000000090ULL;
+            }
         }
 
-        // captures
+        // captures (remove victim piece from hash)
         if (move.isCapture) {
-            if      (blackPawns   & toMask) { u.capturedPiece='p'; blackPawns   &=~toMask; }
-            else if (blackRooks   & toMask) { u.capturedPiece='r'; blackRooks   &=~toMask; }
-            else if (blackKnights & toMask) { u.capturedPiece='n'; blackKnights &=~toMask; }
-            else if (blackBishops & toMask) { u.capturedPiece='b'; blackBishops &=~toMask; }
-            else if (blackQueens  & toMask) { u.capturedPiece='q'; blackQueens  &=~toMask; }
-            else if (blackKing    & toMask) { u.capturedPiece='k'; blackKing    &=~toMask; }
+            if      (blackPawns   & toMask) { u.capturedPiece='p'; zobristHash ^= zobristTable[getPieceIndex('P')][move.to]; blackPawns   &=~toMask; }
+            else if (blackRooks   & toMask) { u.capturedPiece='r'; zobristHash ^= zobristTable[getPieceIndex('R')][move.to]; blackRooks   &=~toMask; }
+            else if (blackKnights & toMask) { u.capturedPiece='n'; zobristHash ^= zobristTable[getPieceIndex('N')][move.to]; blackKnights &=~toMask; }
+            else if (blackBishops & toMask) { u.capturedPiece='b'; zobristHash ^= zobristTable[getPieceIndex('B')][move.to]; blackBishops &=~toMask; }
+            else if (blackQueens  & toMask) { u.capturedPiece='q'; zobristHash ^= zobristTable[getPieceIndex('Q')][move.to]; blackQueens  &=~toMask; }
+            else if (blackKing    & toMask) { u.capturedPiece='k'; zobristHash ^= zobristTable[getPieceIndex('K')][move.to]; blackKing    &=~toMask; }
             else if (u.prevEnPassantTarget & toMask) {
                 // en-passant capture: capture pawn behind EP target square
                 u.wasEnPassant  = true;
                 u.capturedPiece = 'p';
+
+                const int victimSq = move.to - 8;
+                zobristHash ^= zobristTable[getPieceIndex('P')][victimSq];
                 blackPawns &= ~(toMask >> 8);
             }
         }
@@ -856,59 +949,115 @@ void Board::makeMoveFast(Move& move, Undo& u) {
     else {
         // ---------------- BLACK MOVE ----------------
         if (blackPawns & fromMask) {
-            blackPawns ^= fromMask | toMask;
+            // black pawn leaves from (black pawns are 'P' in your getPieceAt/hash)
+            zobristHash ^= zobristTable[getPieceIndex('P')][move.from];
 
             if (move.to == move.from - 16)
                 enPassantTarget = 1ULL << (move.from - 8);
 
             if (move.promotion) {
-                blackPawns &= ~toMask;
+                // promotion piece is UPPERCASE for black in your hash
+                const char promo = (char)std::toupper((unsigned char)move.promotion);
+                zobristHash ^= zobristTable[getPieceIndex(promo)][move.to];
+
+                blackPawns ^= fromMask;
                 switch (move.promotion) {
                     case 'q': blackQueens  |= toMask; break;
                     case 'r': blackRooks   |= toMask; break;
                     case 'b': blackBishops |= toMask; break;
                     case 'n': blackKnights |= toMask; break;
                 }
+            } else {
+                zobristHash ^= zobristTable[getPieceIndex('P')][move.to];
+                blackPawns ^= fromMask | toMask;
             }
         }
         else if (blackRooks & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('R')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('R')][move.to];
+
             blackRooks ^= fromMask | toMask;
             if (move.from == 56) blackRRookMoved = true;
             if (move.from == 63) blackLRookMoved = true;
         }
-        else if (blackKnights & fromMask) blackKnights ^= fromMask | toMask;
-        else if (blackBishops & fromMask) blackBishops ^= fromMask | toMask;
-        else if (blackQueens  & fromMask) blackQueens  ^= fromMask | toMask;
-        else if (blackKing    & fromMask) {
+        else if (blackKnights & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('N')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('N')][move.to];
+            blackKnights ^= fromMask | toMask;
+        }
+        else if (blackBishops & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('B')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('B')][move.to];
+            blackBishops ^= fromMask | toMask;
+        }
+        else if (blackQueens & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('Q')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('Q')][move.to];
+            blackQueens ^= fromMask | toMask;
+        }
+        else if (blackKing & fromMask) {
+            zobristHash ^= zobristTable[getPieceIndex('K')][move.from];
+            zobristHash ^= zobristTable[getPieceIndex('K')][move.to];
+
             blackKing ^= fromMask | toMask;
             blackKingMoved = true;
 
-            if (move.to == move.from - 2)      blackRooks ^= 0x0500000000000000ULL; // king-side
-            else if (move.to == move.from + 2) blackRooks ^= 0x9000000000000000ULL; // queen-side
+            if (move.to == move.from - 2) {
+                // rook 56 -> 58
+                zobristHash ^= zobristTable[getPieceIndex('R')][56];
+                zobristHash ^= zobristTable[getPieceIndex('R')][58];
+                blackRooks ^= 0x0500000000000000ULL;
+            }
+            else if (move.to == move.from + 2) {
+                // rook 63 -> 60
+                zobristHash ^= zobristTable[getPieceIndex('R')][63];
+                zobristHash ^= zobristTable[getPieceIndex('R')][60];
+                blackRooks ^= 0x9000000000000000ULL;
+            }
         }
 
         if (move.isCapture) {
-            if      (whitePawns   & toMask) { u.capturedPiece='p'; whitePawns   &=~toMask; }
-            else if (whiteRooks   & toMask) { u.capturedPiece='r'; whiteRooks   &=~toMask; }
-            else if (whiteKnights & toMask) { u.capturedPiece='n'; whiteKnights &=~toMask; }
-            else if (whiteBishops & toMask) { u.capturedPiece='b'; whiteBishops &=~toMask; }
-            else if (whiteQueens  & toMask) { u.capturedPiece='q'; whiteQueens  &=~toMask; }
-            else if (whiteKing    & toMask) { u.capturedPiece='k'; whiteKing    &=~toMask; }
+            if      (whitePawns   & toMask) { u.capturedPiece='p'; zobristHash ^= zobristTable[getPieceIndex('p')][move.to]; whitePawns   &=~toMask; }
+            else if (whiteRooks   & toMask) { u.capturedPiece='r'; zobristHash ^= zobristTable[getPieceIndex('r')][move.to]; whiteRooks   &=~toMask; }
+            else if (whiteKnights & toMask) { u.capturedPiece='n'; zobristHash ^= zobristTable[getPieceIndex('n')][move.to]; whiteKnights &=~toMask; }
+            else if (whiteBishops & toMask) { u.capturedPiece='b'; zobristHash ^= zobristTable[getPieceIndex('b')][move.to]; whiteBishops &=~toMask; }
+            else if (whiteQueens  & toMask) { u.capturedPiece='q'; zobristHash ^= zobristTable[getPieceIndex('q')][move.to]; whiteQueens  &=~toMask; }
+            else if (whiteKing    & toMask) { u.capturedPiece='k'; zobristHash ^= zobristTable[getPieceIndex('k')][move.to]; whiteKing    &=~toMask; }
             else if (u.prevEnPassantTarget & toMask) {
                 u.wasEnPassant  = true;
                 u.capturedPiece = 'p';
+
+                const int victimSq = move.to + 8;
+                zobristHash ^= zobristTable[getPieceIndex('p')][victimSq];
                 whitePawns &= ~(toMask << 8);
             }
         }
     }
 
+    // ---- add new EP to hash ----
+    if (enPassantTarget) {
+        int file = (lsb_index(enPassantTarget) & 7);
+        zobristHash ^= zobristEnPassant[file];
+    }
+
+    // ---- update castling-right hash (toggle keys when moved-flags changed) ----
+    if (u.prevWhiteKingMoved  != whiteKingMoved)  zobristHash ^= zobristCastling[0];
+    if (u.prevWhiteRRookMoved != whiteRRookMoved) zobristHash ^= zobristCastling[1];
+    if (u.prevWhiteLRookMoved != whiteLRookMoved) zobristHash ^= zobristCastling[2];
+
+    if (u.prevBlackKingMoved  != blackKingMoved)  zobristHash ^= zobristCastling[3];
+    if (u.prevBlackRRookMoved != blackRRookMoved) zobristHash ^= zobristCastling[4];
+    if (u.prevBlackLRookMoved != blackLRookMoved) zobristHash ^= zobristCastling[5];
+
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
+    // toggle side
     whiteToMove = !whiteToMove;
+    zobristHash ^= zobristSideToMove;
 }
 
-void Board::undoMoveFast(const Move& move, const Undo& u) {
+void Board::undoMove(const Move& move, const Undo& u) {
     enPassantTarget = u.prevEnPassantTarget;
 
     whiteKingMoved  = u.prevWhiteKingMoved;
@@ -923,7 +1072,7 @@ void Board::undoMoveFast(const Move& move, const Undo& u) {
     Bitboard toMask   = 1ULL << move.to;
 
     if (!whiteToMove) {
-        // undo WHITE move (because side-to-move was toggled in makeMoveFast)
+        // undo WHITE move
         if (move.promotion) {
             whitePawns |= fromMask;
             switch (move.promotion) {
@@ -1001,6 +1150,9 @@ void Board::undoMoveFast(const Move& move, const Undo& u) {
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
     whiteToMove = !whiteToMove;
+
+    // Perfect O(1) restore (avoids any drift bugs)
+    zobristHash = u.prevHash;
 }
 
 void setBit(Bitboard& bitboard, int square) {
@@ -1114,7 +1266,7 @@ char Board::getPieceAt(int index) const {
 }
 
 int Board::getEnPassantFile() const {
-    int index = ctzll(enPassantTarget);
+    int index = lsb_index(enPassantTarget);
     int file = index % 8;
     return file;
 }
@@ -1173,7 +1325,8 @@ uint64_t Board::generateZobristHash() const {
 }
 
 void Board::updatePositionHistory(bool plus) {
-    uint64_t hash = generateZobristHash();
+    const uint64_t hash = zobristHash;
+
     if (plus){
         positionHistory[hash] += 1;
     }
@@ -1187,14 +1340,16 @@ void Board::updatePositionHistory(bool plus) {
 }
 
 bool Board::isThreefoldRepetition() {
-    uint64_t hash = generateZobristHash();
+    const uint64_t hash = zobristHash;
     auto it = positionHistory.find(hash);
     int count = (it == positionHistory.end()) ? 0 : it->second;
     return count >= 3;;
 }
 
 bool Board::isThreefoldRepetition(uint64_t hash) {
-    return positionHistory[hash] >= 2;
+    auto it = positionHistory.find(hash);
+    int count = (it == positionHistory.end()) ? 0 : it->second;
+    return count >= 2; 
 }
 
 int getPieceValue(char piece) {

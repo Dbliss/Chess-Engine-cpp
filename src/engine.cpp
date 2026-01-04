@@ -151,11 +151,12 @@ void Engine::updateHistory(Board& board, int from, int to, int bonus) {
     }
 }
 
-std::vector<Move> Engine::orderMoves(Board& board, const std::vector<Move>& moves, const Move& hashMove, int depth) {
-    std::vector<std::pair<Move, uint64_t>> scored;
-    scored.reserve(moves.size());
+void Engine::orderMoves(Board& board, MoveList& moves, const Move& hashMove, int depth) {
+    ScoredMove scored[256];
+    const int n = moves.size;
 
-    for (const Move& m : moves) {
+    for (int i = 0; i < n; ++i) {
+        const Move& m = moves.m[i];
         uint64_t score = 0;
 
         if (m == hashMove) {
@@ -163,10 +164,9 @@ std::vector<Move> Engine::orderMoves(Board& board, const std::vector<Move>& move
         }
         else if (m.isCapture || m.promotion) {
             int cap = isGoodCapture(m, board);
-            score += cap;
+            score += (int64_t)cap; // keep sign influence
             if (cap < 0) {
-                // bad captures sink
-                scored.push_back({ m, score });
+                scored[i] = { m, score };
                 continue;
             }
             if (m.promotion) score += (uint64_t)getPieceValue(m.promotion);
@@ -175,25 +175,22 @@ std::vector<Move> Engine::orderMoves(Board& board, const std::vector<Move>& move
         else if (isKiller(m, depth)) {
             score = maxHistoryValue_;
         }
-        else {
-            if (cfg_.useHistoryHeuristic) {
-                int idx = board.posToValue(m.from);
-                if (idx >= 0 && idx < 12) score = history_[idx][m.to];
-            }
+        else if (cfg_.useHistoryHeuristic) {
+            int idx = board.posToValue(m.from);
+            if (idx >= 0 && idx < 12) score = history_[idx][m.to];
         }
 
-        scored.push_back({ m, score });
+        scored[i] = { m, score };
     }
 
-    std::sort(scored.begin(), scored.end(),
-        [](const std::pair<Move, uint64_t>& a, const std::pair<Move, uint64_t>& b) {
-            return a.second > b.second;
-        });
+    std::sort(scored, scored + n, [](const ScoredMove& a, const ScoredMove& b) {
+        return a.score > b.score;
+    });
 
-    std::vector<Move> ordered;
-    ordered.reserve(scored.size());
-    for (auto& p : scored) ordered.push_back(p.first);
-    return ordered;
+    // write back into MoveList in sorted order
+    for (int i = 0; i < n; ++i) {
+        moves.m[i] = scored[i].mv;
+    }
 }
 
 // ------------------------------------------------------------
@@ -201,6 +198,9 @@ std::vector<Move> Engine::orderMoves(Board& board, const std::vector<Move>& move
 int Engine::evaluate(Board& board) const {
     // quick draw: kings only
     if ((std::popcount(board.whitePieces) == 1) && (std::popcount(board.blackPieces) == 1)) return 0;
+    
+    MoveList tmp;
+
 
     // piece-square tables from your engine2.cpp
     static const int pawn_pcsq[64] = {
@@ -418,11 +418,19 @@ int Engine::evaluate(Board& board) const {
             result -= pawnStormBonus[rank] * std::popcount(bp);
         }
 
-        int whiteKingProxy = (int)board.generateQueenMoves(board.whiteKing, board.whitePieces, board.blackPieces).size();
+        // white king “queen mobility”
+        tmp.clear();
+        board.generateQueenMoves(tmp, board.whiteKing, board.whitePieces, board.blackPieces);
+        int whiteKingProxy = tmp.size;
+
         if (whiteKingProxy <= 1) result -= (2 - whiteKingProxy) * 16;
         else if (whiteKingProxy > 3) result -= whiteKingProxy * 5;
 
-        int blackKingProxy = (int)board.generateQueenMoves(board.blackKing, board.blackPieces, board.whitePieces).size();
+        // black king “queen mobility”
+        tmp.clear();
+        board.generateQueenMoves(tmp, board.blackKing, board.blackPieces, board.whitePieces);
+        int blackKingProxy = tmp.size;
+
         if (blackKingProxy <= 1) result += (2 - blackKingProxy) * 16;
         else if (blackKingProxy > 3) result += blackKingProxy * 5;
     }
@@ -510,14 +518,37 @@ int Engine::evaluate(Board& board) const {
     result -= 15 * std::popcount((leftDefB | rightDefB) & board.blackPawns);
 
     // mobility
-    result += 4 * (int)board.generateBishopMoves(board.whiteBishops, board.whitePieces, board.blackPieces).size();
-    result -= 4 * (int)board.generateBishopMoves(board.blackBishops, board.blackPieces, board.whitePieces).size();
+    // white king “queen mobility”
+    tmp.clear();
+    board.generateBishopMoves(tmp, board.whiteBishops, board.whitePieces, board.blackPieces);
+    int numWhiteBishopMoves = tmp.size;
+    result += 4 * numWhiteBishopMoves;
 
-    result += 6 * (int)board.generateRookMoves(board.whiteRooks, board.whitePieces, board.blackPieces).size();
-    result -= 6 * (int)board.generateRookMoves(board.blackRooks, board.blackPieces, board.whitePieces).size();
+    tmp.clear();
+    board.generateBishopMoves(tmp, board.blackBishops, board.blackPieces, board.whitePieces);
+    int numBlackBishopMoves = tmp.size;
+    result -= 4 * numBlackBishopMoves;
 
-    result += 6 * (int)board.generateQueenMoves(board.whiteQueens, board.whitePieces, board.blackPieces).size();
-    result -= 6 * (int)board.generateQueenMoves(board.blackQueens, board.blackPieces, board.whitePieces).size();
+
+    tmp.clear();
+    board.generateRookMoves(tmp, board.whiteRooks, board.whitePieces, board.blackPieces);
+    int numWhiteRookMoves = tmp.size;
+    result += 6 * numWhiteRookMoves;
+
+    tmp.clear();
+    board.generateRookMoves(tmp, board.blackRooks, board.blackPieces, board.whitePieces);
+    int numBlackRookMoves = tmp.size;
+    result -= 6 * numBlackRookMoves;
+
+    tmp.clear();
+    board.generateQueenMoves(tmp, board.whiteQueens, board.whitePieces, board.blackPieces);
+    int numWhiteQueenMoves = tmp.size;
+    result += 6 * numWhiteQueenMoves;
+
+    tmp.clear();
+    board.generateQueenMoves(tmp, board.blackQueens, board.blackPieces, board.whitePieces);
+    int numBlackQueenMoves = tmp.size;
+    result -= 6 * numBlackQueenMoves;
 
     // expand lead late + king distance (from engine2)
     if (gamePhase > 0.6 && std::abs(result) > 400.0) {
@@ -540,9 +571,9 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
     lastNodes_++;
 
     const bool sideToMoveInCheck = board.amIInCheck(board.whiteToMove);
-    std::vector<Move> legalMoves = board.generateAllMoves();
+    MoveList legalMoves;
 
-    if (legalMoves.empty()) {
+    if (legalMoves.size == 0) {
         // If in check -> checkmate. If not -> stalemate draw.
         return sideToMoveInCheck ? -(MATE_SCORE - ply) : 0;
     }
@@ -559,7 +590,7 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
     // - If in check: must consider ALL legal moves (evasions can be quiet king moves / blocks).
     // - If not in check: only consider tactical moves (captures/promotions, optionally checks).
     std::vector<std::pair<Move, int>> candidateMoves;
-    candidateMoves.reserve(legalMoves.size());
+    candidateMoves.reserve(legalMoves.size);
 
     for (const Move& moveRef : legalMoves) {
         bool shouldSearchThisMove = sideToMoveInCheck; // if in check, search everything
@@ -653,7 +684,7 @@ int Engine::search(Board& board,
     const int originalAlpha = alpha;
     bestMoveOut = Move(-1, -1);
 
-    const uint64_t key = board.generateZobristHash();
+    const uint64_t key = board.zobristHash;
 
     // Opening book from Board's loaded book entries
     if (cfg_.useOpeningBook && depth == startDepth) {
@@ -685,9 +716,9 @@ int Engine::search(Board& board,
             }
         }
     }
-
-    std::vector<Move> moves = board.generateAllMoves();
-    if (moves.empty()) {
+    MoveList moves;
+    board.generateAllMoves(moves);
+    if (moves.size == 0) {
         bestMoveOut = Move(-1, -1);
         if (board.amIInCheck(board.whiteToMove)) {
             return -(MATE_SCORE - ply); // mated sooner is more negative
@@ -695,7 +726,7 @@ int Engine::search(Board& board,
         return 0;
     }
 
-    moves = orderMoves(board, moves, hashMove, ply);
+    orderMoves(board, moves, hashMove, ply);
 
     int extensionBase = 0;
     std::vector<Move> quietTried;
@@ -731,16 +762,16 @@ int Engine::search(Board& board,
 
     int bestScore = -1000000;
 
-    for (int i = 0; i < (int)moves.size(); ++i) {
-        Move m = moves[i];
+    for (int i = 0; i < moves.size; ++i) {
+        Move& move = moves.m[i];
 
-        bool quiet = (!m.isCapture && !m.promotion);
+        bool quiet = (!move.isCapture && !move.promotion);
         if (cfg_.useHistoryHeuristic && quiet) {
-            quietTried.push_back(m);
+            quietTried.push_back(move);
         }
 
         Undo u;
-        board.makeMove(m, u);
+        board.makeMove(move, u);
 
         int ext = extensionBase;
 
@@ -751,46 +782,28 @@ int Engine::search(Board& board,
         ext = std::clamp(ext, 0, 2);
 
         int reduction = 0;
-        if (cfg_.useLMR && depth >= 4 && !m.isCapture && ext == 0) {
+        if (cfg_.useLMR && depth >= 4 && !move.isCapture && ext == 0) {
             if (i >= 3) reduction = 1;
         }
 
         Move childBest;
-        int child = search(board,
-                           depth - 1 - reduction + ext,
-                           -beta,
-                           -alpha,
-                           startDepth,
-                           ply + 1,
-                           totalExtensions + ext,
-                           false,
-                           childBest,
-                           timedOut);
+        int child = search(board, depth - 1 - reduction + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
 
         int score = -child;
 
         // verify reduced move
         if (!timedOut && reduction == 1 && score > alpha) {
-            child = search(board,
-                           depth - 1 + ext,
-                           -beta,
-                           -alpha,
-                           startDepth,
-                           ply + 1,
-                           totalExtensions + ext,
-                           false,
-                           childBest,
-                           timedOut);
+            child = search(board, depth - 1 + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
             score = -child;
         }
 
-        board.undoMove(m, u);
+        board.undoMove(move, u);
 
         if (timedOut) return 0;
 
         if (score > bestScore) {
             bestScore = score;
-            bestMoveOut = m;
+            bestMoveOut = move;
         }
 
         alpha = std::max(alpha, score);
@@ -798,15 +811,15 @@ int Engine::search(Board& board,
         if (alpha >= beta) {
             // cutoff: reward this quiet move heavily, penalize other quiet moves tried
             if (quiet) {
-                recordKiller(m, ply);
+                recordKiller(move, ply);
 
-                int bonus = depth * depth;            // or 2*depth*depth, tune later
-                int malus = bonus / 4;                // small penalty
+                int bonus = depth * depth;// or 2*depth*depth, tune later
+                int malus = bonus / 4;// small penalty
 
-                updateHistory(board, m.from, m.to, bonus);
+                updateHistory(board, move.from, move.to, bonus);
 
                 for (const Move& q : quietTried) {
-                    if (q == m) continue;
+                    if (q == move) continue;
                     updateHistory(board, q.from, q.to, -malus);
                 }
             }
@@ -876,12 +889,6 @@ Move Engine::getMove(Board& board) {
 
         if (std::abs(bestScore) >= MATE_THRESHOLD) break; // mate found
         if (outOfTime()) break;
-    }
-
-    // if no move chosen, fallback to first legal
-    if (bestMove.from == -1 || bestMove.to == -1) {
-        auto moves = board.generateAllMoves();
-        if (!moves.empty()) bestMove = moves[0];
     }
 
     return bestMove;

@@ -61,8 +61,8 @@ static PerftCounts perft(Board& board, int depth) {
         out.nodes = 1;
         return out;
     }
-
-    std::vector<Move> moves = board.generateAllMoves();
+    MoveList moves;
+    board.generateAllMoves(moves);
 
     for (auto& m : moves) {
         Undo u;
@@ -77,7 +77,9 @@ static PerftCounts perft(Board& board, int depth) {
                 out.checks += 1;
 
                 // Leaf mate: in check and no legal replies
-                if (board.generateAllMoves().empty()) {
+                MoveList tmp;
+                board.generateAllMoves(tmp);
+                if (tmp.size == 0) {
                     out.mates += 1;
                 }
             }
@@ -213,9 +215,9 @@ struct DivideLine {
 
 static std::vector<DivideLine> perftDivideNodesStockfishOrder(Board& board, int depth) {
     std::vector<DivideLine> out;
-
-    std::vector<Move> moves = board.generateAllMoves();
-    out.reserve(moves.size());
+    MoveList moves;
+    board.generateAllMoves(moves);
+    out.reserve(moves.size);
 
     // IMPORTANT: we must compute ordering key from the ROOT position,
     // so do it before makeMove() mutates the board.
@@ -402,6 +404,9 @@ int main() {
                 {3, {2812ULL,    209ULL,   267ULL,   0ULL}},
                 {4, {43238ULL,   3348ULL,  1680ULL,  17ULL}},
                 {5, {674624ULL,  52051ULL, 52950ULL, 0ULL}},
+                {6, {11030083ULL,  940350ULL, 452473ULL, 2733ULL}},
+                {7, {178633661ULL,  14519036ULL, 12797406ULL, 87ULL}},
+                {8, {3009794393ULL,  267586558ULL, 135626805ULL, 450410ULL}},
             }
         },
         {

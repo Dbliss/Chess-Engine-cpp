@@ -36,7 +36,8 @@ static bool applyUCIMove(Board& board, const std::string& uci) {
     if (uci.size() < 4) return false;
 
     // Generate legal moves in the current position
-    std::vector<Move> moves = board.generateAllMoves();
+    MoveList moves;
+    board.generateAllMoves(moves);
 
     for (Move& m : moves) {
         if (moveToUCI(m) == uci) {
@@ -62,7 +63,8 @@ static PerftCounts perft(Board& board, int depth) {
     PerftCounts out{};
     if (depth == 0) { out.nodes = 1; return out; }
 
-    std::vector<Move> moves = board.generateAllMoves();
+    MoveList moves;
+    board.generateAllMoves(moves);
 
     for (auto& m : moves) {
         Undo u;
@@ -76,7 +78,9 @@ static PerftCounts perft(Board& board, int depth) {
             // suites count check if side-to-move is in check at leaf
             if (board.amIInCheck(board.whiteToMove)) {
                 out.checks += 1;
-                if (board.generateAllMoves().empty()) {
+                MoveList tmp; 
+                board.generateAllMoves(tmp);
+                if (tmp.size == 0) {
                     out.mates += 1;
                 }
             }
@@ -159,26 +163,27 @@ struct DivideLine {
     std::tuple<int,int,int,int,int,int,int> key;
 };
 
-static std::vector<DivideLine> divide(Board& b, int depth) {
+static std::vector<DivideLine> divide(Board& board, int depth) {
     std::vector<DivideLine> out;
-    std::vector<Move> moves = b.generateAllMoves();
-    out.reserve(moves.size());
+    MoveList moves;
+    board.generateAllMoves(moves);
+    out.reserve(moves.size);
 
     for (auto& m : moves) {
         DivideLine ln;
         ln.uci = moveToUCI(m);
-        ln.key = stockfishLikeKey(b, m);
+        ln.key = stockfishLikeKey(board, m);
         Undo u;
-        b.makeMove(m, u);
-        ln.nodes = (depth <= 1) ? 1 : perft(b, depth - 1).nodes;
-        b.undoMove(m, u);
+        board.makeMove(m, u);
+        ln.nodes = (depth <= 1) ? 1 : perft(board, depth - 1).nodes;
+        board.undoMove(m, u);
 
         out.push_back(std::move(ln));
     }
 
-    std::sort(out.begin(), out.end(), [](const DivideLine& a, const DivideLine& b) {
-        if (a.key != b.key) return a.key < b.key;
-        return a.uci < b.uci;
+    std::sort(out.begin(), out.end(), [](const DivideLine& a, const DivideLine& board) {
+        if (a.key != board.key) return a.key < board.key;
+        return a.uci < board.uci;
     });
 
     return out;

@@ -79,7 +79,7 @@ private:
                bool& timedOut);
 
     // --- ordering & heuristics (engine-owned, not Board-owned) ---
-    std::vector<Move> orderMoves(Board& board, const std::vector<Move>& moves, const Move& hashMove, int depth);
+    void orderMoves(Board& board, MoveList& moves, const Move& hashMove, int depth);
     bool isKiller(const Move& m, int depth) const;
     void recordKiller(const Move& m, int depth);
     void updateHistory(Board& board, int from, int to, int bonus);

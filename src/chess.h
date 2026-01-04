@@ -45,6 +45,9 @@ public:
 extern const Move NO_MOVE;
 
 struct Undo {
+    // Zobrist hash (restore on undo)
+    uint64_t prevHash = 0;
+
     // EP state
     Bitboard prevEnPassantTarget = 0;
 
@@ -78,6 +81,27 @@ struct TT_Entry {
     TT_Entry() : key(0), score(0), depth(0), flag(HASH_FLAG_EXACT), move(NO_MOVE) {}
 };
 
+struct MoveList {
+    Move m[256];
+    int size = 0;
+
+    inline void clear() { size = 0; }
+
+    inline void push(const Move& mv) {
+        m[size++] = mv;
+    }
+
+    inline Move* begin() { return m; }
+    inline Move* end()   { return m + size; }
+
+    inline const Move* begin() const { return m; }
+    inline const Move* end()   const { return m + size; }
+};
+
+struct ScoredMove {
+    Move mv;
+    uint64_t score;
+};
 
 class Board {
 public:
@@ -117,6 +141,7 @@ public:
 
     Move lastMove;
 
+    uint64_t zobristHash; 
     std::unordered_map<uint64_t, int> positionHistory;
     Move killerMoves[2][64]; // Two killer moves per depth, up to depth of 64
     int64_t historyHeuristic[12][64];
@@ -126,19 +151,20 @@ public:
     void createBoard();
     void createBoardFromFEN(const std::string& fen);
     void printBoard();
-    std::vector<Move> generatePawnMoves(Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces);
-    std::vector<Move> generateBishopMoves(Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces);
-    std::vector<Move> generateRookMoves(Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces);
-    std::vector<Move> generateKnightMoves(Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces);
-    std::vector<Move> generateKingMoves(Bitboard king, Bitboard ownPieces, Bitboard opponentPieces);
-    std::vector<Move> generateQueenMoves(Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces);
-    std::vector<Move> generateAllMoves();
+    void generatePawnMoves(MoveList& moves, Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces);
+    void generateBishopMoves(MoveList& moves, Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces);
+    void generateRookMoves(MoveList& moves, Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces);
+    void generateKnightMoves(MoveList& moves, Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces);
+    void generateKingMoves(MoveList& moves, Bitboard king, Bitboard ownPieces, Bitboard opponentPieces);
+    void generateQueenMoves(MoveList& moves, Bitboard queens, Bitboard ownPieces, Bitboard opponentPieces);
+    void generateAllMoves(MoveList& moves);
     bool amIInCheck(bool player);
     void makeMove(Move& move, Undo& u);
     void undoMove(const Move& move, const Undo& u);
     void makeMoveFast(Move& move, Undo& u);
     void undoMoveFast(const Move& move, const Undo& u);
     char getPieceAt(int index) const;
+    Bitboard computePinnedMask(bool forWhite) const;
 
     void updatePositionHistory(bool plus);
     bool isThreefoldRepetition();

@@ -483,8 +483,9 @@ static GameResult playOne(Board& board,
             return GameResult::Draw;
         }
 
-        std::vector<Move> legal = board.generateAllMoves();
-        if (legal.empty()) {
+        MoveList moves;
+        board.generateAllMoves(moves);
+        if (moves.size == 0) {
             if (board.amIInCheck(board.whiteToMove)) {
                 return board.whiteToMove ? GameResult::BlackWin : GameResult::WhiteWin;
             }

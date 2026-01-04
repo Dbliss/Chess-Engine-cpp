@@ -238,7 +238,9 @@ void playAgainstComputer() {
 
                 if (isPlayerTurn) {
                     // Check for game end
-                    if (board.generateAllMoves().empty()) {
+                    MoveList moves;
+                    board.generateAllMoves(moves);
+                    if (moves.size == 0) {
                         if (board.amIInCheck(board.whiteToMove)) endGameMessage = "You lose";
                         else endGameMessage = "Draw";
 
@@ -258,7 +260,9 @@ void playAgainstComputer() {
                     }
                 } else {
                     // Check for game end
-                    if (board.generateAllMoves().empty()) {
+                    MoveList moves;
+                    board.generateAllMoves(moves);
+                    if (moves.size == 0) {
                         if (board.amIInCheck(board.whiteToMove)) endGameMessage = "You win";
                         else endGameMessage = "Draw";
 

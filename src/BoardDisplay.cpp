@@ -84,8 +84,9 @@ void BoardDisplay::setupPieces(Board& board) {
     bool isCheckmate = false;
 
     if (board.amIInCheck(board.whiteToMove)) {
-        std::vector<Move> moves2 = board.generateAllMoves();
-        if (size(moves2) == 0) {
+        MoveList moves;
+        board.generateAllMoves(moves);
+        if (moves.size == 0) {
             isCheckmate = true;
         }
         else {
@@ -183,8 +184,8 @@ bool BoardDisplay::handleMove(sf::RenderWindow& window, Board& board) {
                 int from = (7 - firstClick.y) * 8 + (7 - firstClick.x);
                 int to = (7 - secondClick.y) * 8 + (7 - secondClick.x);
 
-                // Load legal moves
-                loadLegalMoves(board);
+                MoveList legalMoves;
+                board.generateAllMoves(legalMoves);
 
                 // Check if the move is legal
                 for (Move& legalMove : legalMoves) {
@@ -210,8 +211,4 @@ bool BoardDisplay::handleMove(sf::RenderWindow& window, Board& board) {
     }
 
     return false;
-}
-
-void BoardDisplay::loadLegalMoves(Board& board) {
-    legalMoves = board.generateAllMoves();
 }

@@ -5,26 +5,35 @@
 #include <vector>
 #include <unordered_set>
 #include <random>
+#include <limits>
 
 uint64_t zobristTable[NUM_PIECES][NUM_SQUARES];
 uint64_t zobristCastling[NUM_CASTLING_RIGHTS];
 uint64_t zobristEnPassant[NUM_EN_PASSANT_FILES];
 uint64_t zobristSideToMove;
 
-// Function to generate random numbers
 std::vector<uint64_t> generateRandomNumbers(size_t count, uint64_t seed)
 {
-    std::unordered_set<uint64_t> randomNumbers;
+    std::vector<uint64_t> nums;
+    nums.reserve(count);
+
+    std::unordered_set<uint64_t> seen;
+    seen.reserve(count * 2);
+
     std::mt19937_64 eng(seed);
-    std::uniform_int_distribution<uint64_t> distr(1, UINT64_MAX - 1);
+    std::uniform_int_distribution<uint64_t> dist(
+        1ULL, std::numeric_limits<uint64_t>::max()
+    );
 
-    while (randomNumbers.size() < count)
-    {
-        randomNumbers.insert(distr(eng));
+    while (nums.size() < count) {
+        uint64_t x = dist(eng);
+        if (seen.insert(x).second) {
+            nums.push_back(x);
+        }
     }
-
-    return std::vector<uint64_t>(randomNumbers.begin(), randomNumbers.end());
+    return nums;
 }
+
 
 void initializeZobristTable() {
     // Generate random numbers
