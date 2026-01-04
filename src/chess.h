@@ -18,6 +18,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstdint>
+#include <array>
 
 typedef uint64_t Bitboard;
 
@@ -62,6 +63,11 @@ struct Undo {
     // Capture info
     char capturedPiece = 0;   // 'p','n','b','r','q','k' or 0
     bool wasEnPassant  = false;
+
+    // mailbox undo info:
+    char movedPieceChar = ' ';      // char that was on move.from before the move
+    char capturedPieceChar = ' ';   // char that was captured (exact char), or ' '
+    int  capturedSquare = -1;       // square the victim was on (EP uses behind-square), or -1
 };
 
 enum TTFlag {
@@ -147,6 +153,8 @@ public:
     int64_t historyHeuristic[12][64];
     int64_t maxHistoryValue;
 
+    std::array<char, 64> pieceAt;   // 'p','n'...'k' for white, 'P'...'K' for black, ' ' empty
+
     Board();
     void createBoard();
     void createBoardFromFEN(const std::string& fen);
@@ -165,6 +173,7 @@ public:
     void undoMoveFast(const Move& move, const Undo& u);
     char getPieceAt(int index) const;
     Bitboard computePinnedMask(bool forWhite) const;
+    void rebuildMailbox(); 
 
     void updatePositionHistory(bool plus);
     bool isThreefoldRepetition();

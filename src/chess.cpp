@@ -134,9 +134,6 @@ Bitboard Board::computePinnedMask(bool forWhite) const {
     return pinned;
 }
 
-
-
-// Constructor to initialize the board
 Board::Board() {
     initializeZobristTable();
     createBoard();
@@ -147,40 +144,40 @@ Board::Board() {
     //std::cout << "Number of entries in the transposition table: " << countTranspositionTableEntries() << std::endl;
 }
 
-// Function to initialize the board with the starting positions
 void Board::createBoard() {
-    // Initialize the board with starting positions
-    whitePawns = 0x000000000000FF00ULL;
-    blackPawns = 0x00FF000000000000ULL;
-    whiteRooks = 0x0000000000000081ULL;
-    blackRooks = 0x8100000000000000ULL;
+    whitePawns   = 0x000000000000FF00ULL;
+    blackPawns   = 0x00FF000000000000ULL;
+    whiteRooks   = 0x0000000000000081ULL;
+    blackRooks   = 0x8100000000000000ULL;
     whiteKnights = 0x0000000000000042ULL;
     blackKnights = 0x4200000000000000ULL;
     whiteBishops = 0x0000000000000024ULL;
     blackBishops = 0x2400000000000000ULL;
-    whiteQueens = 0x0000000000000010ULL;
-    blackQueens = 0x1000000000000000ULL;
-    whiteKing = 0x0000000000000008ULL;
-    blackKing = 0x0800000000000000ULL;
-    enPassantTarget = 0x0ULL;
+    whiteQueens  = 0x0000000000000010ULL;
+    blackQueens  = 0x1000000000000000ULL;
+    whiteKing    = 0x0000000000000008ULL;
+    blackKing    = 0x0800000000000000ULL;
+
+    enPassantTarget = 0;
 
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
     whiteToMove = true;
 
-    whiteKingMoved = false;
+    whiteKingMoved  = false;
     whiteLRookMoved = false;
     whiteRRookMoved = false;
-    blackKingMoved = false;
+    blackKingMoved  = false;
     blackLRookMoved = false;
     blackRRookMoved = false;
 
-    // compute once
+    // Build mailbox first, then hash (since hash uses getPieceAt())
+    rebuildMailbox();
     zobristHash = generateZobristHash();
 
     positionHistory.clear();
-    updatePositionHistory(true);   // count the initial position as occurrence #1
+    updatePositionHistory(true);
 }
 
 void Board::createBoardFromFEN(const std::string& fen) {
@@ -841,6 +838,11 @@ void Board::makeMove(Move& move, Undo& u) {
     u.capturedPiece = 0;
     u.wasEnPassant  = false;
 
+    // ---- NEW: mailbox undo init ----
+    u.movedPieceChar = pieceAt[move.from];
+    u.capturedPieceChar = ' ';
+    u.capturedSquare = -1;
+
     // ---- remove old EP from hash (EP is for 1 ply only) ----
     if (enPassantTarget) {
         int file = (lsb_index(enPassantTarget) & 7);
@@ -853,23 +855,45 @@ void Board::makeMove(Move& move, Undo& u) {
     Bitboard fromMask = 1ULL << move.from;
     Bitboard toMask   = 1ULL << move.to;
 
+    // ---- NEW: mailbox capture removal (before we overwrite destination) ----
+    if (move.isCapture) {
+        // EP capture: destination is EP square, victim is behind it
+        if ((u.prevEnPassantTarget & toMask) && (u.movedPieceChar == 'p' || u.movedPieceChar == 'P')) {
+            int victimSq = whiteToMove ? (move.to - 8) : (move.to + 8);
+            u.wasEnPassant = true; // consistent with your bitboard logic
+            u.capturedSquare = victimSq;
+            u.capturedPieceChar = pieceAt[victimSq];
+            pieceAt[victimSq] = ' ';
+        } else {
+            u.capturedSquare = move.to;
+            u.capturedPieceChar = pieceAt[move.to];
+            pieceAt[move.to] = ' ';
+        }
+    }
+
+    // ---- NEW: mailbox move piece from->to (promotion handled) ----
+    pieceAt[move.from] = ' ';
+
+    char placed = u.movedPieceChar;
+    if (move.promotion) {
+        placed = whiteToMove
+            ? move.promotion
+            : (char)std::toupper((unsigned char)move.promotion);
+    }
+    pieceAt[move.to] = placed;
+
+    // ---------------- EXISTING BITBOARD/ZOBRIST LOGIC (unchanged) ----------------
     if (whiteToMove) {
         // ---------------- WHITE MOVE ----------------
         if (whitePawns & fromMask) {
-            // pawn leaves from
             zobristHash ^= zobristTable[getPieceIndex('p')][move.from];
 
-            // double pawn push → create EP square
             if (move.to == move.from + 16)
                 enPassantTarget = 1ULL << (move.from + 8);
 
-            // promotion
             if (move.promotion) {
-                // promoted piece arrives at to (white pieces are lowercase in your hash)
                 zobristHash ^= zobristTable[getPieceIndex(move.promotion)][move.to];
-
-                whitePawns ^= fromMask;      // remove pawn from from
-                // add promoted piece at to
+                whitePawns ^= fromMask;
                 switch (move.promotion) {
                     case 'q': whiteQueens  |= toMask; break;
                     case 'r': whiteRooks   |= toMask; break;
@@ -877,7 +901,6 @@ void Board::makeMove(Move& move, Undo& u) {
                     case 'n': whiteKnights |= toMask; break;
                 }
             } else {
-                // pawn arrives at to
                 zobristHash ^= zobristTable[getPieceIndex('p')][move.to];
                 whitePawns ^= fromMask | toMask;
             }
@@ -885,7 +908,6 @@ void Board::makeMove(Move& move, Undo& u) {
         else if (whiteRooks & fromMask) {
             zobristHash ^= zobristTable[getPieceIndex('r')][move.from];
             zobristHash ^= zobristTable[getPieceIndex('r')][move.to];
-
             whiteRooks ^= fromMask | toMask;
             if (move.from == 0) whiteRRookMoved = true;
             if (move.from == 7) whiteLRookMoved = true;
@@ -912,22 +934,26 @@ void Board::makeMove(Move& move, Undo& u) {
             whiteKing ^= fromMask | toMask;
             whiteKingMoved = true;
 
-            // castling rook movement (also update hash)
             if (move.to == move.from - 2) {
-                // rook 0 -> 2  (mask 0x5)
                 zobristHash ^= zobristTable[getPieceIndex('r')][0];
                 zobristHash ^= zobristTable[getPieceIndex('r')][2];
                 whiteRooks ^= 0x0000000000000005ULL;
+
+                // ---- NEW: mailbox rook shift for castling ----
+                pieceAt[2] = pieceAt[0];
+                pieceAt[0] = ' ';
             }
             else if (move.to == move.from + 2) {
-                // rook 7 -> 4  (mask 0x90)
                 zobristHash ^= zobristTable[getPieceIndex('r')][7];
                 zobristHash ^= zobristTable[getPieceIndex('r')][4];
                 whiteRooks ^= 0x0000000000000090ULL;
+
+                // ---- NEW: mailbox rook shift for castling ----
+                pieceAt[4] = pieceAt[7];
+                pieceAt[7] = ' ';
             }
         }
 
-        // captures (remove victim piece from hash)
         if (move.isCapture) {
             if      (blackPawns   & toMask) { u.capturedPiece='p'; zobristHash ^= zobristTable[getPieceIndex('P')][move.to]; blackPawns   &=~toMask; }
             else if (blackRooks   & toMask) { u.capturedPiece='r'; zobristHash ^= zobristTable[getPieceIndex('R')][move.to]; blackRooks   &=~toMask; }
@@ -936,10 +962,8 @@ void Board::makeMove(Move& move, Undo& u) {
             else if (blackQueens  & toMask) { u.capturedPiece='q'; zobristHash ^= zobristTable[getPieceIndex('Q')][move.to]; blackQueens  &=~toMask; }
             else if (blackKing    & toMask) { u.capturedPiece='k'; zobristHash ^= zobristTable[getPieceIndex('K')][move.to]; blackKing    &=~toMask; }
             else if (u.prevEnPassantTarget & toMask) {
-                // en-passant capture: capture pawn behind EP target square
                 u.wasEnPassant  = true;
                 u.capturedPiece = 'p';
-
                 const int victimSq = move.to - 8;
                 zobristHash ^= zobristTable[getPieceIndex('P')][victimSq];
                 blackPawns &= ~(toMask >> 8);
@@ -949,14 +973,12 @@ void Board::makeMove(Move& move, Undo& u) {
     else {
         // ---------------- BLACK MOVE ----------------
         if (blackPawns & fromMask) {
-            // black pawn leaves from (black pawns are 'P' in your getPieceAt/hash)
             zobristHash ^= zobristTable[getPieceIndex('P')][move.from];
 
             if (move.to == move.from - 16)
                 enPassantTarget = 1ULL << (move.from - 8);
 
             if (move.promotion) {
-                // promotion piece is UPPERCASE for black in your hash
                 const char promo = (char)std::toupper((unsigned char)move.promotion);
                 zobristHash ^= zobristTable[getPieceIndex(promo)][move.to];
 
@@ -975,7 +997,6 @@ void Board::makeMove(Move& move, Undo& u) {
         else if (blackRooks & fromMask) {
             zobristHash ^= zobristTable[getPieceIndex('R')][move.from];
             zobristHash ^= zobristTable[getPieceIndex('R')][move.to];
-
             blackRooks ^= fromMask | toMask;
             if (move.from == 56) blackRRookMoved = true;
             if (move.from == 63) blackLRookMoved = true;
@@ -1003,16 +1024,22 @@ void Board::makeMove(Move& move, Undo& u) {
             blackKingMoved = true;
 
             if (move.to == move.from - 2) {
-                // rook 56 -> 58
                 zobristHash ^= zobristTable[getPieceIndex('R')][56];
                 zobristHash ^= zobristTable[getPieceIndex('R')][58];
                 blackRooks ^= 0x0500000000000000ULL;
+
+                // ---- NEW: mailbox rook shift for castling ----
+                pieceAt[58] = pieceAt[56];
+                pieceAt[56] = ' ';
             }
             else if (move.to == move.from + 2) {
-                // rook 63 -> 60
                 zobristHash ^= zobristTable[getPieceIndex('R')][63];
                 zobristHash ^= zobristTable[getPieceIndex('R')][60];
                 blackRooks ^= 0x9000000000000000ULL;
+
+                // ---- NEW: mailbox rook shift for castling ----
+                pieceAt[60] = pieceAt[63];
+                pieceAt[63] = ' ';
             }
         }
 
@@ -1026,7 +1053,6 @@ void Board::makeMove(Move& move, Undo& u) {
             else if (u.prevEnPassantTarget & toMask) {
                 u.wasEnPassant  = true;
                 u.capturedPiece = 'p';
-
                 const int victimSq = move.to + 8;
                 zobristHash ^= zobristTable[getPieceIndex('p')][victimSq];
                 whitePawns &= ~(toMask << 8);
@@ -1040,7 +1066,7 @@ void Board::makeMove(Move& move, Undo& u) {
         zobristHash ^= zobristEnPassant[file];
     }
 
-    // ---- update castling-right hash (toggle keys when moved-flags changed) ----
+    // ---- update castling-right hash ----
     if (u.prevWhiteKingMoved  != whiteKingMoved)  zobristHash ^= zobristCastling[0];
     if (u.prevWhiteRRookMoved != whiteRRookMoved) zobristHash ^= zobristCastling[1];
     if (u.prevWhiteLRookMoved != whiteLRookMoved) zobristHash ^= zobristCastling[2];
@@ -1071,6 +1097,7 @@ void Board::undoMove(const Move& move, const Undo& u) {
     Bitboard fromMask = 1ULL << move.from;
     Bitboard toMask   = 1ULL << move.to;
 
+    // ---------------- EXISTING BITBOARD UNDO (unchanged) ----------------
     if (!whiteToMove) {
         // undo WHITE move
         if (move.promotion) {
@@ -1149,10 +1176,46 @@ void Board::undoMove(const Move& move, const Undo& u) {
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
+    // ---------------- NEW: MAILBOX UNDO ----------------
+    // At this point, whiteToMove is still "side to move after the move" (i.e. opposite of mover)
+    const bool moverWasWhite = !whiteToMove;
+
+    // clear destination, restore mover to from
+    pieceAt[move.to] = ' ';
+    pieceAt[move.from] = u.movedPieceChar;
+
+    // restore captured piece if any (normal capture or EP)
+    if (u.capturedSquare != -1) {
+        pieceAt[u.capturedSquare] = u.capturedPieceChar;
+    }
+
+    // undo castling rook shift in mailbox
+    const char kingChar = moverWasWhite ? 'k' : 'K';
+    if (u.movedPieceChar == kingChar) {
+        if (move.to == move.from - 2) {
+            // rook was moved: (white: 0->2, black: 56->58)
+            int rookFrom = moverWasWhite ? 2 : 58;
+            int rookTo   = moverWasWhite ? 0 : 56;
+            pieceAt[rookTo] = pieceAt[rookFrom];
+            pieceAt[rookFrom] = ' ';
+        } else if (move.to == move.from + 2) {
+            // rook was moved: (white: 7->4, black: 63->60)
+            int rookFrom = moverWasWhite ? 4 : 60;
+            int rookTo   = moverWasWhite ? 7 : 63;
+            pieceAt[rookTo] = pieceAt[rookFrom];
+            pieceAt[rookFrom] = ' ';
+        }
+    }
+
+    // restore side to move
     whiteToMove = !whiteToMove;
 
-    // Perfect O(1) restore (avoids any drift bugs)
+    // Perfect O(1) restore
     zobristHash = u.prevHash;
+}
+
+char Board::getPieceAt(int index) const {
+    return ((unsigned)index < 64) ? pieceAt[index] : ' ';
 }
 
 void setBit(Bitboard& bitboard, int square) {
@@ -1243,26 +1306,35 @@ void parseFEN(const std::string& fen, Board& board) {
         board.whiteBishops | board.whiteQueens | board.whiteKing;
     board.blackPieces = board.blackPawns | board.blackRooks | board.blackKnights |
         board.blackBishops | board.blackQueens | board.blackKing;
+
+    board.rebuildMailbox();
 }
 
-char Board::getPieceAt(int index) const {
-    if (index < 0 || index >= 64) return ' ';
+void Board::rebuildMailbox() {
+    pieceAt.fill(' ');
 
-    if (whitePawns & (1ULL << index)) return 'p';
-    if (whiteRooks & (1ULL << index)) return 'r';
-    if (whiteKnights & (1ULL << index)) return 'n';
-    if (whiteBishops & (1ULL << index)) return 'b';
-    if (whiteQueens & (1ULL << index)) return 'q';
-    if (whiteKing & (1ULL << index)) return 'k';
+    auto place = [&](Bitboard bb, char c) {
+        while (bb) {
+            int sq = pop_lsb(bb);
+            pieceAt[sq] = c;
+        }
+    };
 
-    if (blackPawns & (1ULL << index)) return 'P';
-    if (blackRooks & (1ULL << index)) return 'R';
-    if (blackKnights & (1ULL << index)) return 'N';
-    if (blackBishops & (1ULL << index)) return 'B';
-    if (blackQueens & (1ULL << index)) return 'Q';
-    if (blackKing & (1ULL << index)) return 'K';
+    // white (lowercase in your engine)
+    place(whitePawns, 'p');
+    place(whiteKnights, 'n');
+    place(whiteBishops, 'b');
+    place(whiteRooks, 'r');
+    place(whiteQueens, 'q');
+    place(whiteKing,  'k');
 
-    return ' ';
+    // black (uppercase in your engine)
+    place(blackPawns, 'P');
+    place(blackKnights, 'N');
+    place(blackBishops, 'B');
+    place(blackRooks, 'R');
+    place(blackQueens, 'Q');
+    place(blackKing, 'K');
 }
 
 int Board::getEnPassantFile() const {
@@ -1424,6 +1496,7 @@ std::vector<std::pair<Move, uint64_t>> orderMoves(Board& board, const std::vecto
     Move hashMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
 
     std::vector<std::pair<Move, uint64_t>> allMoves;
+    allMoves.reserve(moves.size());
 
     for (const Move& move : moves) {
         uint64_t score = 0;
@@ -1463,6 +1536,7 @@ std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_E
     Move hashMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
 
     std::vector<std::pair<Move, uint64_t>> allMoves;
+    allMoves.reserve(moves.size());
 
     for (const Move& move : moves) {
         uint64_t score = 0;
@@ -1499,18 +1573,10 @@ std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_E
 
     // Combine all move categories into the final ordered list
     std::vector<Move> orderedMoves;
+    orderedMoves.reserve(moves.size());
     for (const auto& pair : allMoves) orderedMoves.push_back(pair.first);
 
     return orderedMoves;
-}
-
-bool isTacticalPosition(std::vector<Move> moves, Board board) {
-    for (const Move& move : moves) {
-        if (isGoodCapture(move, board) || isEqualCapture(move, board) || move.promotion) {
-            return true;
-        }
-    }
-    return false;
 }
 
 void Board::resize_tt(uint64_t mb) {
@@ -1561,7 +1627,7 @@ void Board::clear_tt() {
 }
 
 TT_Entry* Board::probeTranspositionTable(uint64_t hash) {
-    return &transposition_table[hash % transposition_table.size()];
+    return &transposition_table[hash & (transposition_table.size() - 1)];
 }
 
 // Checking if it is a quiet position or not
