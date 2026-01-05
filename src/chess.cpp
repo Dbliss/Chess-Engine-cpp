@@ -7,11 +7,12 @@
 #include "zobrist.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <fstream>
 #include <cmath>
 #include <bit>
-
-const Move NO_MOVE;
+#include <immintrin.h>
 
 constexpr Bitboard NOT_A_FILE = 0x7F7F7F7F7F7F7F7FULL;
 constexpr Bitboard NOT_H_FILE = 0xFEFEFEFEFEFEFEFEULL;
@@ -143,17 +144,51 @@ static inline int first_blocker_sq(Bitboard blockers, int dirDelta) {
     return (dirDelta > 0) ? lsb_index(blockers) : msb_index(blockers);
 }
 
-static inline Bitboard rook_attacks_ray(int from, Bitboard occ) {
-    Bitboard a = 0;
+alignas(64) static Bitboard ROOK_MASK[64];
+alignas(64) static Bitboard BISHOP_MASK[64];
+static std::vector<Bitboard> ROOK_TAB[64];
+static std::vector<Bitboard> BISHOP_TAB[64];
 
-    // N,S,E,W
+static Bitboard rook_mask_sq(int sq) {
+    // mask without edges (standard)
+    Bitboard m = 0;
+    int r = sq / 8, f = sq % 8;
+    for (int rr=r+1; rr<=6; rr++) m |= 1ULL << (rr*8+f);
+    for (int rr=r-1; rr>=1; rr--) m |= 1ULL << (rr*8+f);
+    for (int ff=f+1; ff<=6; ff++) m |= 1ULL << (r*8+ff);
+    for (int ff=f-1; ff>=1; ff--) m |= 1ULL << (r*8+ff);
+    return m;
+}
+
+static Bitboard bishop_mask_sq(int sq) {
+    Bitboard m = 0;
+    int r = sq / 8, f = sq % 8;
+    for (int rr=r+1, ff=f+1; rr<=6 && ff<=6; rr++,ff++) m |= 1ULL<<(rr*8+ff);
+    for (int rr=r+1, ff=f-1; rr<=6 && ff>=1; rr++,ff--) m |= 1ULL<<(rr*8+ff);
+    for (int rr=r-1, ff=f+1; rr>=1 && ff<=6; rr--,ff++) m |= 1ULL<<(rr*8+ff);
+    for (int rr=r-1, ff=f-1; rr>=1 && ff>=1; rr--,ff--) m |= 1ULL<<(rr*8+ff);
+    return m;
+}
+
+
+static inline __forceinline Bitboard rook_attacks(int sq, Bitboard occ) {
+    uint64_t idx = _pext_u64(occ, ROOK_MASK[sq]);
+    return ROOK_TAB[sq][idx];
+}
+static inline __forceinline Bitboard bishop_attacks(int sq, Bitboard occ) {
+    uint64_t idx = _pext_u64(occ, BISHOP_MASK[sq]);
+    return BISHOP_TAB[sq][idx];
+}
+
+static inline Bitboard rook_attacks_slow(int from, Bitboard occ) {
+    Bitboard a = 0;
     const int dirs[4] = { DIR_N, DIR_S, DIR_E, DIR_W };
     for (int di : dirs) {
         Bitboard ray = RAY[di][from];
         Bitboard blockers = ray & occ;
         if (blockers) {
             int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
-            a |= (ray & ~RAY[di][bSq]); // up to + incl blocker
+            a |= (ray & ~RAY[di][bSq]);
         } else {
             a |= ray;
         }
@@ -161,10 +196,8 @@ static inline Bitboard rook_attacks_ray(int from, Bitboard occ) {
     return a;
 }
 
-static inline Bitboard bishop_attacks_ray(int from, Bitboard occ) {
+static inline Bitboard bishop_attacks_slow(int from, Bitboard occ) {
     Bitboard a = 0;
-
-    // NE,NW,SE,SW
     const int dirs[4] = { DIR_NE, DIR_NW, DIR_SE, DIR_SW };
     for (int di : dirs) {
         Bitboard ray = RAY[di][from];
@@ -179,43 +212,61 @@ static inline Bitboard bishop_attacks_ray(int from, Bitboard occ) {
     return a;
 }
 
-static inline bool isSquareAttacked_fast(int targetSquare, bool attackersAreWhite, Bitboard occupiedSquares, Bitboard attackerPawns, Bitboard attackerKnights, Bitboard attackerBishops, Bitboard attackerRooks, Bitboard attackerQueens, Bitboard attackerKing) {
+static void init_slider_pext_tables() {
+    for (int sq=0; sq<64; ++sq) {
+        ROOK_MASK[sq] = rook_mask_sq(sq);
+        BISHOP_MASK[sq] = bishop_mask_sq(sq);
+
+        const int rBits = std::popcount(ROOK_MASK[sq]);
+        const int bBits = std::popcount(BISHOP_MASK[sq]);
+
+        ROOK_TAB[sq].assign(1ULL<<rBits, 0);
+        BISHOP_TAB[sq].assign(1ULL<<bBits, 0);
+
+        // enumerate subsets (carry-rippler)
+        Bitboard m = ROOK_MASK[sq];
+        for (Bitboard subset = m;; subset = (subset - 1) & m) {
+            uint64_t idx = _pext_u64(subset, m);
+            ROOK_TAB[sq][idx] = rook_attacks_slow(sq, subset); // reuse your correct generator
+            if (!subset) break;
+        }
+
+        m = BISHOP_MASK[sq];
+        for (Bitboard subset = m;; subset = (subset - 1) & m) {
+            uint64_t idx = _pext_u64(subset, m);
+            BISHOP_TAB[sq][idx] = bishop_attacks_slow(sq, subset);
+            if (!subset) break;
+        }
+    }
+}
+
+static inline __forceinline bool isSquareAttacked_fast(
+    int targetSquare,
+    bool attackersAreWhite,
+    Bitboard occupiedSquares,
+    Bitboard attackerPawns,
+    Bitboard attackerKnights,
+    Bitboard attackerBishops,
+    Bitboard attackerRooks,
+    Bitboard attackerQueens,
+    Bitboard attackerKing
+) {
     const int pawnIdx = attackersAreWhite ? 0 : 1;
 
-    // pawn attackers (no shifting)
+    // pawns (no shifting)
     if (attackerPawns & PAWN_ATTACKERS[pawnIdx][targetSquare]) return true;
 
-    // knight / king (symmetry lets us use targetSquare table directly)
+    // knights / king (precomputed)
     if (attackerKnights & KNIGHT_ATTACKS[targetSquare]) return true;
-    if (attackerKing & KING_ATTACKS[targetSquare]) return true;
+    if (attackerKing    & KING_ATTACKS[targetSquare])   return true;
 
-    // sliding: ray + first blocker
-    const Bitboard rookQueen = attackerRooks | attackerQueens;
+    // sliders via PEXT attack tables
+    const Bitboard rookQueen = attackerRooks   | attackerQueens;
     const Bitboard bishQueen = attackerBishops | attackerQueens;
 
-    // diagonals
-    {
-        const int dirs[4] = { DIR_NE, DIR_NW, DIR_SE, DIR_SW };
-        for (int di : dirs) {
-            Bitboard ray = RAY[di][targetSquare];
-            Bitboard blockers = ray & occupiedSquares;
-            if (!blockers) continue;
-            int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
-            if (bishQueen & (1ULL << bSq)) return true;
-        }
-    }
-
-    // orthogonals
-    {
-        const int dirs[4] = { DIR_N, DIR_S, DIR_E, DIR_W };
-        for (int di : dirs) {
-            Bitboard ray = RAY[di][targetSquare];
-            Bitboard blockers = ray & occupiedSquares;
-            if (!blockers) continue;
-            int bSq = first_blocker_sq(blockers, DIR_DELTA[di]);
-            if (rookQueen & (1ULL << bSq)) return true;
-        }
-    }
+    // NOTE: bishop_attacks/rook_attacks already account for blockers in occupiedSquares
+    if (bishQueen & bishop_attacks(targetSquare, occupiedSquares)) return true;
+    if (rookQueen & rook_attacks(targetSquare, occupiedSquares))   return true;
 
     return false;
 }
@@ -305,9 +356,15 @@ static inline bool isSquareAttacked(int targetSquare, bool attackersAreWhite, Bi
     return false;
 }
 
-Bitboard Board::computePinnedMask(bool forWhite) const {
-    init_attack_tables_once();
+static inline void init_slider_pext_tables_once() {
+    static bool done = false;
+    if (!done) {
+        init_slider_pext_tables();
+        done = true;
+    }
+}
 
+Bitboard Board::computePinnedMask(bool forWhite) const {
     const Bitboard ownPieces   = forWhite ? whitePieces : blackPieces;
     const Bitboard enemyPieces = forWhite ? blackPieces : whitePieces;
     const Bitboard occ = ownPieces | enemyPieces;
@@ -351,6 +408,7 @@ Bitboard Board::computePinnedMask(bool forWhite) const {
 
 Board::Board() {
     init_attack_tables_once();
+    init_slider_pext_tables_once();
     initializeZobristTable();
     createBoard();
     resize_tt(64);  // Calls the resize function to allocate memory
@@ -375,6 +433,7 @@ void Board::createBoard() {
     blackKing    = 0x0800000000000000ULL;
 
     enPassantTarget = 0;
+    epFile = -1;
 
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
@@ -402,13 +461,10 @@ void Board::createBoard() {
 
 void Board::createBoardFromFEN(const std::string& fen) {
     parseFEN(fen, *this);
-
     zobristHash = generateZobristHash();
 
-    // (Optional) keep if you still use it outside search:
     positionHistory.clear();
 
-    // --- NEW: repetition stack init ---
     repPly = 0;
     repIrrevIndex = 0;
     repStack[repPly++] = zobristHash;
@@ -616,14 +672,12 @@ void Board::generatePawnMoves(MoveList& moves, Bitboard pawns, Bitboard ownPiece
 }
 
 void Board::generateBishopMoves(MoveList& moves, Bitboard bishops, Bitboard ownPieces, Bitboard opponentPieces) {
-    init_attack_tables_once();
-
     const Bitboard occupied = ownPieces | opponentPieces;
 
     while (bishops) {
         const int from = pop_lsb(bishops);
 
-        Bitboard targets = bishop_attacks_ray(from, occupied) & ~ownPieces;
+        Bitboard targets = bishop_attacks(from, occupied) & ~ownPieces;
 
         Bitboard captures = targets & opponentPieces;
         Bitboard quiets   = targets & ~opponentPieces;
@@ -642,14 +696,12 @@ void Board::generateBishopMoves(MoveList& moves, Bitboard bishops, Bitboard ownP
 }
 
 void Board::generateRookMoves(MoveList& moves, Bitboard rooks, Bitboard ownPieces, Bitboard opponentPieces) {
-    init_attack_tables_once();
-
     const Bitboard occupied = ownPieces | opponentPieces;
 
     while (rooks) {
         const int from = pop_lsb(rooks);
 
-        Bitboard targets = rook_attacks_ray(from, occupied) & ~ownPieces;
+        Bitboard targets = rook_attacks(from, occupied) & ~ownPieces;
 
         Bitboard captures = targets & opponentPieces;
         Bitboard quiets   = targets & ~opponentPieces;
@@ -668,8 +720,6 @@ void Board::generateRookMoves(MoveList& moves, Bitboard rooks, Bitboard ownPiece
 }
 
 void Board::generateKnightMoves(MoveList& moves, Bitboard knights, Bitboard ownPieces, Bitboard opponentPieces) {
-    init_attack_tables_once();
-
     while (knights) {
         const int from = pop_lsb(knights);
 
@@ -692,8 +742,6 @@ void Board::generateKnightMoves(MoveList& moves, Bitboard knights, Bitboard ownP
 }
 
 void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard ownPieces, Bitboard opponentPieces) {
-    const int kingSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
-
     const int kingFromSquare = lsb_index(kingBitboard);
     const Bitboard kingFromMask = 1ULL << kingFromSquare;
 
@@ -712,19 +760,14 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
     // Occupancy with our king removed (important: king moving can uncover slider attacks)
     const Bitboard occupiedWithoutOurKing = allOccupied & ~kingFromMask;
 
-    // Generate legal king steps WITHOUT make/undo
-    for (int step : kingSteps) {
-        int kingToSquare = kingFromSquare + step;
+    // ---------------------------
+    // King steps via precomputed table (no edge/mod/abs checks)
+    // ---------------------------
+    Bitboard kingTargets = KING_ATTACKS[kingFromSquare] & ~ownPieces;
 
-        // edge checks (keep exactly as you had them)
-        if (kingToSquare < 0 || kingToSquare >= 64 ||
-            (kingFromSquare % 8 == 0 && (step == -1 || step == 7 || step == -9)) ||
-            (kingFromSquare % 8 == 7 && (step == 1  || step == -7 || step == 9)))
-            continue;
-
+    while (kingTargets) {
+        const int kingToSquare = pop_lsb(kingTargets);
         const Bitboard kingToMask = 1ULL << kingToSquare;
-
-        if (ownPieces & kingToMask) continue;
 
         // If capturing, remove the captured piece from occupancy + from attacker sets
         Bitboard occupiedAfterKingMove = occupiedWithoutOurKing;
@@ -758,16 +801,30 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
                 rooksAfterCapture,
                 queensAfterCapture,
                 kingAfterCapture
-            )) continue;
+            )) {
+            continue;
+        }
 
         Move m(kingFromSquare, kingToSquare);
         if (opponentPieces & kingToMask) m.isCapture = true;
         moves.push(m);
     }
 
-    // Castling: not currently in check, squares between empty, and BOTH crossed squares not attacked.
+    // ---------------------------
+    // Castling (same logic as your existing function)
+    // ---------------------------
     const bool kingCurrentlyInCheck =
-        isSquareAttacked_fast(kingFromSquare, attackersAreWhite, allOccupied, attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing);
+        isSquareAttacked_fast(
+            kingFromSquare,
+            attackersAreWhite,
+            allOccupied,
+            attackerPawns,
+            attackerKnights,
+            attackerBishops,
+            attackerRooks,
+            attackerQueens,
+            attackerKing
+        );
 
     if (!kingCurrentlyInCheck) {
         if (whiteToMove) {
@@ -775,10 +832,28 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!whiteKingMoved && !whiteRRookMoved && (whiteRooks & 0x0000000000000001ULL)) {
                 const Bitboard emptyBetweenMask = 0x0000000000000006ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked_fast(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked_fast(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                    if (!isSquareAttacked_fast(
+                            kingFromSquare - 1,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        ) &&
+                        !isSquareAttacked_fast(
+                            kingFromSquare - 2,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        )) {
                         moves.push(Move(kingFromSquare, kingFromSquare - 2));
                     }
                 }
@@ -788,10 +863,28 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!whiteKingMoved && !whiteLRookMoved && (whiteRooks & 0x0000000000000080ULL)) {
                 const Bitboard emptyBetweenMask = 0x0000000000000070ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked_fast(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked_fast(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                    if (!isSquareAttacked_fast(
+                            kingFromSquare + 1,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        ) &&
+                        !isSquareAttacked_fast(
+                            kingFromSquare + 2,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        )) {
                         moves.push(Move(kingFromSquare, kingFromSquare + 2));
                     }
                 }
@@ -801,10 +894,28 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!blackKingMoved && !blackRRookMoved && (blackRooks & 0x0100000000000000ULL)) {
                 const Bitboard emptyBetweenMask = 0x0600000000000000ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked_fast(kingFromSquare - 1, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked_fast(kingFromSquare - 2, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                    if (!isSquareAttacked_fast(
+                            kingFromSquare - 1,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        ) &&
+                        !isSquareAttacked_fast(
+                            kingFromSquare - 2,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        )) {
                         moves.push(Move(kingFromSquare, kingFromSquare - 2));
                     }
                 }
@@ -814,10 +925,28 @@ void Board::generateKingMoves(MoveList& moves, Bitboard kingBitboard, Bitboard o
             if (!blackKingMoved && !blackLRookMoved && (blackRooks & 0x8000000000000000ULL)) {
                 const Bitboard emptyBetweenMask = 0x7000000000000000ULL;
                 if ((allOccupied & emptyBetweenMask) == 0) {
-                    if (!isSquareAttacked_fast(kingFromSquare + 1, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing) &&
-                        !isSquareAttacked_fast(kingFromSquare + 2, attackersAreWhite, occupiedWithoutOurKing,
-                                          attackerPawns, attackerKnights, attackerBishops, attackerRooks, attackerQueens, attackerKing)) {
+                    if (!isSquareAttacked_fast(
+                            kingFromSquare + 1,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        ) &&
+                        !isSquareAttacked_fast(
+                            kingFromSquare + 2,
+                            attackersAreWhite,
+                            occupiedWithoutOurKing,
+                            attackerPawns,
+                            attackerKnights,
+                            attackerBishops,
+                            attackerRooks,
+                            attackerQueens,
+                            attackerKing
+                        )) {
                         moves.push(Move(kingFromSquare, kingFromSquare + 2));
                     }
                 }
@@ -887,8 +1016,6 @@ void Board::generateAllMoves(MoveList& legalMoves) {
 }
 
 bool Board::amIInCheck(bool player) {
-    init_attack_tables_once();
-
     const Bitboard ownKing = player ? whiteKing : blackKing;
     const int kingPos = lsb_index(ownKing);
 
@@ -921,6 +1048,7 @@ void Board::makeNullMove(Undo& u) {
     u.prevHash = zobristHash;
 
     u.prevEnPassantTarget = enPassantTarget;
+    u.prevEpFile = epFile;
 
     u.prevWhiteKingMoved  = whiteKingMoved;
     u.prevWhiteLRookMoved = whiteLRookMoved;
@@ -931,22 +1059,21 @@ void Board::makeNullMove(Undo& u) {
     u.prevBlackRRookMoved = blackRRookMoved;
 
     // remove old EP from hash then clear EP
-    if (enPassantTarget) {
-        int file = (lsb_index(enPassantTarget) & 7);
-        zobristHash ^= zobristEnPassant[file];
+    if (epFile != -1) {
+        zobristHash ^= zobristEnPassant[epFile];
     }
     enPassantTarget = 0;
+    epFile = -1;
 
     // toggle side
     whiteToMove = !whiteToMove;
     zobristHash ^= zobristSideToMove;
-
-    // NOTE: do NOT push null positions onto repStack unless you also disable repetition checks in null-search
 }
 
 void Board::undoNullMove(const Undo& u) {
     // restore state exactly
     enPassantTarget = u.prevEnPassantTarget;
+    epFile = u.prevEpFile;
 
     whiteKingMoved  = u.prevWhiteKingMoved;
     whiteLRookMoved = u.prevWhiteLRookMoved;
@@ -966,6 +1093,7 @@ void Board::makeMove(Move& move, Undo& u) {
     u.prevHash = zobristHash;
 
     u.prevEnPassantTarget = enPassantTarget;
+    u.prevEpFile = epFile;
 
     u.prevWhiteKingMoved  = whiteKingMoved;
     u.prevWhiteLRookMoved = whiteLRookMoved;
@@ -986,29 +1114,26 @@ void Board::makeMove(Move& move, Undo& u) {
     u.capturedSquare = -1;
 
     // ---- remove old EP from hash (EP is for 1 ply only) ----
-    if (enPassantTarget) {
-        int file = (lsb_index(enPassantTarget) & 7);
-        zobristHash ^= zobristEnPassant[file];
+    if (epFile != -1) {
+        zobristHash ^= zobristEnPassant[epFile];
     }
-
-    // EP exists for ONE ply only
+    epFile = -1;
     enPassantTarget = 0;
 
     const Bitboard fromMask = 1ULL << move.from;
     const Bitboard toMask   = 1ULL << move.to;
 
     // ----------------- DERIVE CAPTURE (robust against book/external moves) -----------------
-    const Bitboard oppPieces = whiteToMove ? blackPieces : whitePieces;
+    const Bitboard oppOcc = whiteToMove ? blackPieces : whitePieces; // occupancy of opponent
 
     const bool pawnMover = (u.movedPieceChar == 'p' || u.movedPieceChar == 'P');
     const bool isEpSquare = (u.prevEnPassantTarget & toMask) != 0;
 
-    // EP destination square is empty in mailbox, and pawn must move diagonally to it
     const int delta = move.to - move.from;
     const bool epDeltaOk = whiteToMove ? (delta == 7 || delta == 9) : (delta == -7 || delta == -9);
 
-    const bool isEpCap = pawnMover && isEpSquare && (pieceAt[move.to] == ' ') && epDeltaOk;
-    const bool isNormCap = (oppPieces & toMask) != 0;
+    const bool isEpCap   = pawnMover && isEpSquare && (pieceAt[move.to] == ' ') && epDeltaOk;
+    const bool isNormCap = (oppOcc & toMask) != 0;
 
     move.isCapture = (isEpCap || isNormCap);
 
@@ -1045,8 +1170,11 @@ void Board::makeMove(Move& move, Undo& u) {
             case 'p': {
                 zobristHash ^= zobristTable[getPieceIndex('p')][move.from];
 
-                if (move.to == move.from + 16)
-                    enPassantTarget = 1ULL << (move.from + 8);
+                if (move.to == move.from + 16) {
+                    const int epSq = move.from + 8;
+                    enPassantTarget = 1ULL << epSq;
+                    epFile = (epSq & 7);
+                }
 
                 if (move.promotion) {
                     zobristHash ^= zobristTable[getPieceIndex(move.promotion)][move.to];
@@ -1158,9 +1286,11 @@ void Board::makeMove(Move& move, Undo& u) {
             case 'P': {
                 zobristHash ^= zobristTable[getPieceIndex('P')][move.from];
 
-                if (move.to == move.from - 16)
-                    enPassantTarget = 1ULL << (move.from - 8);
-
+                if (move.to == move.from - 16) {
+                    const int epSq = move.from - 8;
+                    enPassantTarget = 1ULL << epSq;
+                    epFile = (epSq & 7);
+                }
                 if (move.promotion) {
                     const char promo = (char)std::toupper((unsigned char)move.promotion);
                     zobristHash ^= zobristTable[getPieceIndex(promo)][move.to];
@@ -1267,9 +1397,8 @@ void Board::makeMove(Move& move, Undo& u) {
     }
 
     // ---- add new EP to hash ----
-    if (enPassantTarget) {
-        int file = (lsb_index(enPassantTarget) & 7);
-        zobristHash ^= zobristEnPassant[file];
+    if (epFile != -1) {
+        zobristHash ^= zobristEnPassant[epFile];
     }
 
     // ---- update castling-right hash ----
@@ -1281,9 +1410,41 @@ void Board::makeMove(Move& move, Undo& u) {
     if (u.prevBlackRRookMoved != blackRRookMoved) zobristHash ^= zobristCastling[4];
     if (u.prevBlackLRookMoved != blackLRookMoved) zobristHash ^= zobristCastling[5];
 
-    // recompute aggregates
-    whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
-    blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
+    // ------------------------------------------------------------------
+    // NEW: Incremental occupancy update (replaces OR-rebuild every move)
+    // ------------------------------------------------------------------
+    {
+        Bitboard& moverOcc2 = whiteToMove ? whitePieces : blackPieces;
+        Bitboard& oppOcc2   = whiteToMove ? blackPieces : whitePieces;
+
+        // mover piece from -> to
+        moverOcc2 ^= fromMask;
+        moverOcc2 |= toMask;
+
+        // capture removal (EP uses victim square, not 'to')
+        if (move.isCapture) {
+            const Bitboard capMask = u.wasEnPassant ? (1ULL << u.capturedSquare) : toMask;
+            oppOcc2 &= ~capMask;
+        }
+
+        // castling rook squares (your engine mapping)
+        const char kingChar = whiteToMove ? 'k' : 'K';
+        if (u.movedPieceChar == kingChar) {
+            if (move.to == move.from - 2) {
+                // rook: 0->2 (white), 56->58 (black)
+                const int rookFrom = whiteToMove ? 0 : 56;
+                const int rookTo   = whiteToMove ? 2 : 58;
+                moverOcc2 ^= (1ULL << rookFrom);
+                moverOcc2 |= (1ULL << rookTo);
+            } else if (move.to == move.from + 2) {
+                // rook: 7->4 (white), 63->60 (black)
+                const int rookFrom = whiteToMove ? 7 : 63;
+                const int rookTo   = whiteToMove ? 4 : 60;
+                moverOcc2 ^= (1ULL << rookFrom);
+                moverOcc2 |= (1ULL << rookTo);
+            }
+        }
+    }
 
     // toggle side
     whiteToMove = !whiteToMove;
@@ -1307,6 +1468,7 @@ void Board::makeMove(Move& move, Undo& u) {
 
 void Board::undoMove(const Move& move, const Undo& u) {
     enPassantTarget = u.prevEnPassantTarget;
+    epFile = u.prevEpFile;
 
     whiteKingMoved  = u.prevWhiteKingMoved;
     whiteLRookMoved = u.prevWhiteLRookMoved;
@@ -1316,11 +1478,15 @@ void Board::undoMove(const Move& move, const Undo& u) {
     blackLRookMoved = u.prevBlackLRookMoved;
     blackRRookMoved = u.prevBlackRRookMoved;
 
-    Bitboard fromMask = 1ULL << move.from;
-    Bitboard toMask   = 1ULL << move.to;
+    const Bitboard fromMask = 1ULL << move.from;
+    const Bitboard toMask   = 1ULL << move.to;
 
-    // ---------------- EXISTING BITBOARD UNDO (unchanged) ----------------
-    if (!whiteToMove) {
+    // who made the move we're undoing?
+    // (your existing logic relies on current whiteToMove being "side to play after the move")
+    const bool undoingWhiteMove = !whiteToMove;
+
+    // ---------------- EXISTING PIECE-BITBOARD UNDO (UNCHANGED LOGIC) ----------------
+    if (undoingWhiteMove) {
         // undo WHITE move
         if (move.promotion) {
             whitePawns |= fromMask;
@@ -1395,11 +1561,44 @@ void Board::undoMove(const Move& move, const Undo& u) {
         }
     }
 
-    whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
-    blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
+    // ------------------------------------------------------------------
+    // NEW: Incremental occupancy restore (replaces OR-rebuild every undo)
+    // ------------------------------------------------------------------
+    {
+        Bitboard& moverOcc = undoingWhiteMove ? whitePieces : blackPieces;
+        Bitboard& oppOcc   = undoingWhiteMove ? blackPieces : whitePieces;
+
+        // mover piece back: to -> from
+        moverOcc &= ~toMask;
+        moverOcc |= fromMask;
+
+        // undo castling rook squares (your engine mapping)
+        const char kingChar = undoingWhiteMove ? 'k' : 'K';
+        if (u.movedPieceChar == kingChar) {
+            if (move.to == move.from - 2) {
+                // rook: 2->0 (white), 58->56 (black)
+                const int rookFrom = undoingWhiteMove ? 2 : 58;
+                const int rookTo   = undoingWhiteMove ? 0 : 56;
+                moverOcc &= ~(1ULL << rookFrom);
+                moverOcc |=  (1ULL << rookTo);
+            } else if (move.to == move.from + 2) {
+                // rook: 4->7 (white), 60->63 (black)
+                const int rookFrom = undoingWhiteMove ? 4 : 60;
+                const int rookTo   = undoingWhiteMove ? 7 : 63;
+                moverOcc &= ~(1ULL << rookFrom);
+                moverOcc |=  (1ULL << rookTo);
+            }
+        }
+
+        // restore captured piece occupancy (EP uses victim square)
+        if (move.isCapture) {
+            const Bitboard capMask = u.wasEnPassant ? (1ULL << u.capturedSquare) : toMask;
+            oppOcc |= capMask;
+        }
+    }
 
     // ---------------- MAILBOX UNDO ----------------
-    const bool moverWasWhite = !whiteToMove;
+    const bool moverWasWhite = undoingWhiteMove;
 
     pieceAt[move.to] = ' ';
     pieceAt[move.from] = u.movedPieceChar;
@@ -1408,8 +1607,8 @@ void Board::undoMove(const Move& move, const Undo& u) {
         pieceAt[u.capturedSquare] = u.capturedPieceChar;
     }
 
-    const char kingChar = moverWasWhite ? 'k' : 'K';
-    if (u.movedPieceChar == kingChar) {
+    const char kingChar2 = moverWasWhite ? 'k' : 'K';
+    if (u.movedPieceChar == kingChar2) {
         if (move.to == move.from - 2) {
             int rookFrom = moverWasWhite ? 2 : 58;
             int rookTo   = moverWasWhite ? 0 : 56;
@@ -1429,7 +1628,7 @@ void Board::undoMove(const Move& move, const Undo& u) {
     // Perfect O(1) restore
     zobristHash = u.prevHash;
 
-    // ---------------- NEW: repetition stack pop + restore boundary ----------------
+    // ---------------- repetition stack pop + restore boundary ----------------
     if (repPly > 0) --repPly;
     repIrrevIndex = u.prevRepIrrevIndex;
 }
@@ -1512,13 +1711,14 @@ void parseFEN(const std::string& fen, Board& board) {
     board.whiteToMove = (activeColor == "w");
 
     board.enPassantTarget = 0;
+    board.epFile = -1;
 
-    // Handle the en passant target square if there is one
     if (enPassant != "-") {
-        int file = enPassant[0] - 'a';  // 'a' to 'h' -> 0 to 7
-        int rank = enPassant[1] - '1';  // '1' to '8' -> 0 to 7
-        int enPassantSquare = (rank) * 8 + (7 - file); // Convert to 0-63 indexing adjusted for your board setup
-        board.enPassantTarget = 1ULL << enPassantSquare;
+        const int epSq = boardPositionToIndex(enPassant);
+        if (epSq >= 0 && epSq < 64) {
+            board.enPassantTarget = 1ULL << epSq;
+            board.epFile = (epSq & 7);
+        }
     }
 
     // Update the overall piece bitboards
@@ -1558,28 +1758,28 @@ void Board::rebuildMailbox() {
 }
 
 int Board::getEnPassantFile() const {
-    int index = lsb_index(enPassantTarget);
-    int file = index % 8;
-    return file;
+    return epFile;
 }
 
-int Board::getPieceIndex(char piece) const {
-    switch (piece) {
-    case 'p': return 0;
-    case 'n': return 1;
-    case 'b': return 2;
-    case 'r': return 3;
-    case 'q': return 4;
-    case 'k': return 5;
-    case 'P': return 6;
-    case 'N': return 7;
-    case 'B': return 8;
-    case 'R': return 9;
-    case 'Q': return 10;
-    case 'K': return 11;
-    default: return -1;
-    }
+static const std::array<int8_t, 128> PIECE_IDX = []{
+    std::array<int8_t, 128> t{};
+    // fill with -1 without requiring constexpr support
+    for (auto &x : t) x = -1;
+
+    t['p']=0; t['n']=1; t['b']=2; t['r']=3; t['q']=4; t['k']=5;
+    t['P']=6; t['N']=7; t['B']=8; t['R']=9; t['Q']=10; t['K']=11;
+    return t;
+}();
+
+static inline __forceinline int piece_index(char c) {
+    return PIECE_IDX[(unsigned char)c];
 }
+
+// If you want to keep the old name:
+int Board::getPieceIndex(char piece) const {
+    return piece_index(piece);
+}
+
 
 uint64_t Board::generateZobristHash() const {
     uint64_t hash = 0;
@@ -1603,9 +1803,8 @@ uint64_t Board::generateZobristHash() const {
     if (blackLRookMoved == false) hash ^= zobristCastling[5]; // Black queenside castling right
 
     // Add en passant square to the hash
-    if (enPassantTarget) {
-        int file = getEnPassantFile(); // A function to get the file of the en passant target
-        hash ^= zobristEnPassant[file];
+    if (epFile != -1) {
+        hash ^= zobristEnPassant[epFile];
     }
 
     // Add side to move to the hash
@@ -1839,7 +2038,7 @@ int boardPositionToIndex(const std::string& pos) {
 
 // Function to convert move string (e.g., "e2e4") to a Move object
 Move convertToMoveObject(const std::string& moveStr) {
-    if (moveStr.size() != 4) return Move(-1, -1); // Invalid move string
+    if (moveStr.size() != 4) return NO_MOVE; // Invalid move string
     std::string fromStr = moveStr.substr(0, 2);
     std::string toStr = moveStr.substr(2, 2);
 

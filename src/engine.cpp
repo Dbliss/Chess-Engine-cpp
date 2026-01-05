@@ -32,7 +32,6 @@ bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights
     return true;
 }
 
-// ------------------------------------------------------------
 static inline unsigned ctz64(uint64_t x) {
     return x ? (unsigned)std::countr_zero(x) : 64u;
 }
@@ -47,7 +46,6 @@ static inline int kingDistance(uint64_t king1, uint64_t king2) {
     return std::max(std::abs(x1 - x2), std::abs(y1 - y2));
 }
 
-// ------------------------------------------------------------
 Engine::Engine(const EngineConfig& cfg)
     : cfg_(cfg) {
     resizeTT(cfg_.ttSizeMB);
@@ -94,7 +92,7 @@ void Engine::newGame() {
     // clear heuristics
     for (int i = 0; i < 2; ++i) {
         for (int d = 0; d < MAX_PLY; ++d) {
-            killers_[i][d] = Move(-1, -1);
+            killers_[i][d] = NO_MOVE;
         }
     }
 
@@ -193,8 +191,6 @@ void Engine::orderMoves(Board& board, MoveList& moves, const Move& hashMove, int
     }
 }
 
-// ------------------------------------------------------------
-// Evaluation
 int Engine::evaluate(Board& board) const {
     // quick draw: kings only
     if ((std::popcount(board.whitePieces) == 1) && (std::popcount(board.blackPieces) == 1)) return 0;
@@ -558,8 +554,6 @@ int Engine::evaluate(Board& board) const {
     return board.whiteToMove ? s : -s;
 }
 
-// ------------------------------------------------------------
-// Quiescence: captures/promotions, optionally +checks
 int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOut) {
     if (outOfTime()) { timedOut = true; return 0; }
     lastNodes_++;
@@ -659,34 +653,23 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
     return alpha;
 }
 
-// ------------------------------------------------------------
-// Alpha-beta (negamax) search
-int Engine::search(Board& board,
-                   int depth,
-                   int alpha,
-                   int beta,
-                   int startDepth,
-                   int ply,
-                   int totalExtensions,
-                   bool lastIterationNull,
-                   Move& bestMoveOut,
-                   bool& timedOut) {
+int Engine::search(Board& board, int depth, int alpha, int beta, int startDepth, int ply, int totalExtensions, bool lastIterationNull, Move& bestMoveOut, bool& timedOut) {
     if (outOfTime()) { timedOut = true; return 0; }
 
     if (depth <= 0) {
-        bestMoveOut = Move(-1, -1);
+        bestMoveOut = NO_MOVE;
         return quiescence(board, alpha, beta, ply, timedOut);
     }
 
     // Treat repetition as a draw during search
     if (ply > 0 && !lastIterationNull && board.isThreefoldRepetition()) {
-        bestMoveOut = Move(-1, -1);
+        bestMoveOut = NO_MOVE;
         return 0;
     }
 
     const int originalAlpha = alpha;
     const int originalBeta  = beta;
-    bestMoveOut = Move(-1, -1);
+    bestMoveOut = NO_MOVE;
 
     const uint64_t key = board.zobristHash;
 
@@ -701,7 +684,7 @@ int Engine::search(Board& board,
 
     // TT probe (engine-owned)
     EngineTTEntry* tt = probeTT(key);
-    Move hashMove(-1, -1);
+    Move hashMove = NO_MOVE;
 
     if (tt && tt->key == key) {
         hashMove = tt->move;
@@ -723,7 +706,7 @@ int Engine::search(Board& board,
     MoveList moves;
     board.generateAllMoves(moves);
     if (moves.size == 0) {
-        bestMoveOut = Move(-1, -1);
+        bestMoveOut = NO_MOVE;
         if (board.amIInCheck(board.whiteToMove)) {
             return -(MATE_SCORE - ply); // mated sooner is more negative
         }
@@ -812,7 +795,6 @@ int Engine::search(Board& board,
     return bestScore;
 }
 
-// ------------------------------------------------------------
 void Engine::setTimeLimitMs(int ms) {
     if (ms < 1) ms = 1;
     if (ms > 20000) ms = 20000;
@@ -830,16 +812,16 @@ Move Engine::getMove(Board& board) {
     lastDepth_ = 0;
     lastEval_  = 0;
 
-    Move bestMove(-1, -1);
+    Move bestMove = NO_MOVE;
     int bestScore = 0;
 
-    Move prevBest(-1, -1);
+    Move prevBest = NO_MOVE;
     int prevScore = 0;
 
     bool timedOut = false;
 
     for (int depth = 1; depth <= cfg_.maxDepth; ++depth) {
-        Move rootBest(-1, -1);
+        Move rootBest = NO_MOVE;
         timedOut = false;
 
         int score = search(board, depth, -999999, 999999, depth, 0, 0, false, rootBest, timedOut);

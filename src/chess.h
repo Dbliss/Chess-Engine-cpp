@@ -26,23 +26,21 @@ typedef uint64_t Bitboard;
 #define USE_HASH_MOVE       1
 #define RETURN_HASH_SCORE   2
 
-class Move {
-public:
-    int from;
-    int to;
-    char promotion;   // 'q','r','b','n' or 0
+struct Move {
+    int  from;
+    int  to;
+    char promotion;   // 0 or 'q','r','b','n'
     bool isCapture;
-
-    Move() : from(-1), to(-1), promotion(0), isCapture(false) {}
-    Move(int f, int t, char p = 0) : from(f), to(t), promotion(p), isCapture(false) {}
-
-    bool operator==(const Move& other) const {
-        return from == other.from && to == other.to && promotion == other.promotion;
-    }
-    bool operator!=(const Move& other) const { return !(*this == other); }
 };
 
-extern const Move NO_MOVE;
+inline constexpr Move NO_MOVE{ -1, -1, 0, false };
+
+inline constexpr bool operator==(const Move& a, const Move& b) noexcept {
+    return a.from == b.from && a.to == b.to && a.promotion == b.promotion;
+}
+inline constexpr bool operator!=(const Move& a, const Move& b) noexcept {
+    return !(a == b);
+}
 
 struct Undo {
     // Zobrist hash (restore on undo)
@@ -51,6 +49,7 @@ struct Undo {
 
     // EP state
     Bitboard prevEnPassantTarget = 0;
+    int prevEpFile = -1;
 
     // Castling-right flags (your engine uses these booleans as "moved" flags)
     bool prevWhiteKingMoved  = false;
@@ -93,9 +92,7 @@ struct MoveList {
 
     inline void clear() { size = 0; }
 
-    inline void push(const Move& mv) {
-        m[size++] = mv;
-    }
+    inline void push(const Move& mv) { m[size++] = mv; }
 
     inline Move* begin() { return m; }
     inline Move* end()   { return m + size; }
@@ -146,6 +143,7 @@ public:
     bool blackRRookMoved;
 
     Move lastMove;
+    int epFile;
 
     uint64_t zobristHash; 
     std::unordered_map<uint64_t, int> positionHistory;
@@ -206,8 +204,6 @@ public:
 void setBit(Bitboard& bitboard, int square);
 void parseFEN(const std::string& fen, Board& board);
 std::string numToBoardPosition(int num);
-std::vector<std::pair<Move, uint64_t>> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
-std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
 bool isTacticalPosition(const std::vector<Move>& moves, const Board& board);
 bool isNullViable(Board& board);
 Move convertToMoveObject(const std::string& moveStr);

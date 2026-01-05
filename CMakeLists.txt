@@ -8,6 +8,8 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+find_package(SFML CONFIG REQUIRED COMPONENTS Graphics Window System Audio)
+
 add_executable(ChessEngine
     src/main.cpp
     src/chess.cpp
@@ -36,21 +38,5 @@ add_executable(EngineTuning
     src/zobrist.cpp
 )
 
-target_link_libraries(EngineTuning PRIVATE
-    SFML::Graphics
-    SFML::Window
-    SFML::System
-    SFML::Audio
-)
-
-target_compile_features(PerftSuite PRIVATE cxx_std_20)
-
-
-find_package(SFML CONFIG REQUIRED COMPONENTS Graphics Window System Audio)
-
-target_link_libraries(ChessEngine PRIVATE
-    SFML::Graphics
-    SFML::Window
-    SFML::System
-    SFML::Audio
-)
+target_link_libraries(ChessEngine PRIVATE SFML::Graphics SFML::Window SFML::System SFML::Audio)
+target_link_libraries(EngineTuning PRIVATE SFML::Graphics SFML::Window SFML::System SFML::Audio)
