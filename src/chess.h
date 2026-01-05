@@ -26,7 +26,6 @@ typedef uint64_t Bitboard;
 #define USE_HASH_MOVE       1
 #define RETURN_HASH_SCORE   2
 
-
 class Move {
 public:
     int from;
@@ -48,6 +47,7 @@ extern const Move NO_MOVE;
 struct Undo {
     // Zobrist hash (restore on undo)
     uint64_t prevHash = 0;
+    int prevRepIrrevIndex = 0;
 
     // EP state
     Bitboard prevEnPassantTarget = 0;
@@ -105,8 +105,8 @@ struct MoveList {
 };
 
 struct ScoredMove {
-    Move mv;
-    uint64_t score;
+    Move m;
+    int score;
 };
 
 class Board {
@@ -152,6 +152,11 @@ public:
     Move killerMoves[2][64]; // Two killer moves per depth, up to depth of 64
     int64_t historyHeuristic[12][64];
     int64_t maxHistoryValue;
+
+    static constexpr int MAX_REP_PLY = 2048;
+    std::array<uint64_t, MAX_REP_PLY> repStack{};
+    int repPly = 0;
+    int repIrrevIndex = 0;
 
     std::array<char, 64> pieceAt;   // 'p','n'...'k' for white, 'P'...'K' for black, ' ' empty
 
@@ -203,10 +208,106 @@ void parseFEN(const std::string& fen, Board& board);
 std::string numToBoardPosition(int num);
 std::vector<std::pair<Move, uint64_t>> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
 std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth);
-bool isTacticalPosition(std::vector<Move> moves, Board board);
+bool isTacticalPosition(const std::vector<Move>& moves, const Board& board);
 bool isNullViable(Board& board);
 Move convertToMoveObject(const std::string& moveStr);
 int boardPositionToIndex(const std::string& pos);
 int isGoodCapture(const Move& move, const Board& board);
 bool isEqualCapture(const Move& move, const Board& board);
 int getPieceValue(char piece);
+
+class MovePicker {
+public:
+    MovePicker(Board& b, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth)
+        : board(b), d(depth)
+    {
+        ttMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
+        hasTT = !(ttMove == NO_MOVE);
+
+        killer1 = board.killerMoves[0][depth];
+        killer2 = board.killerMoves[1][depth];
+
+        goodCaps.reserve(moves.size());
+        badCaps.reserve(moves.size());
+        quiets.reserve(moves.size());
+        killers.reserve(2);
+
+        for (const Move& mv : moves) {
+            if (hasTT && mv == ttMove) continue;
+
+            if (mv.isCapture || mv.promotion) {
+                int s = isGoodCapture(mv, board);
+                if (mv.promotion) s += getPieceValue(mv.promotion) + 1000;
+
+                if (s >= 0 || mv.promotion) goodCaps.push_back({ mv, s });
+                else                        badCaps.push_back({ mv, s });
+            }
+            else if (mv == killer1 || mv == killer2) {
+                killers.push_back(mv);
+            }
+            else {
+                int s = (int)board.historyHeuristic[board.posToValue(mv.from)][mv.to];
+                quiets.push_back({ mv, s });
+            }
+        }
+    }
+
+    bool next(Move& out) {
+        // stage 0: TT move
+        if (!ttDone) {
+            ttDone = true;
+            if (hasTT) { out = ttMove; return true; }
+        }
+
+        // stage 1: good captures/promos
+        if (pickBestFrom(goodCaps, goodIdx, out)) return true;
+
+        // stage 2: killers
+        while (killerIdx < (int)killers.size()) {
+            out = killers[killerIdx++];
+            return true;
+        }
+
+        // stage 3: quiets by history
+        if (pickBestFrom(quiets, quietIdx, out)) return true;
+
+        // stage 4: bad captures last
+        if (pickBestFrom(badCaps, badIdx, out)) return true;
+
+        return false;
+    }
+
+private:
+    Board& board;
+    int d;
+
+    Move ttMove = NO_MOVE;
+    bool hasTT = false;
+    bool ttDone = false;
+
+    Move killer1 = NO_MOVE, killer2 = NO_MOVE;
+    std::vector<Move> killers;
+    int killerIdx = 0;
+
+    std::vector<ScoredMove> goodCaps, badCaps, quiets;
+    int goodIdx = 0, badIdx = 0, quietIdx = 0;
+
+    static inline bool pickBestFrom(std::vector<ScoredMove>& v, int& idx, Move& out) {
+        if (idx >= (int)v.size()) return false;
+
+        int best = idx;
+        int bestScore = v[idx].score;
+
+        for (int i = idx + 1; i < (int)v.size(); ++i) {
+            if (v[i].score > bestScore) {
+                bestScore = v[i].score;
+                best = i;
+            }
+        }
+
+        if (best != idx) std::swap(v[best], v[idx]);
+        out = v[idx].m;
+        ++idx;
+        return true;
+    }
+};

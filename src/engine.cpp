@@ -21,8 +21,6 @@ static inline int scoreFromTT(int score, int ply) {
     return score;
 }
 
-// ------------------------------------------------------------
-// Compatibility helper
 bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights, int numBlackBishops) {
     int totalWhite = numWhiteKnights + numWhiteBishops;
     int totalBlack = numBlackKnights + numBlackBishops;
@@ -152,44 +150,46 @@ void Engine::updateHistory(Board& board, int from, int to, int bonus) {
 }
 
 void Engine::orderMoves(Board& board, MoveList& moves, const Move& hashMove, int depth) {
-    ScoredMove scored[256];
+    struct LocalScored {
+        Move m;
+        int  score; // signed
+    };
+
+    LocalScored scored[256];
     const int n = moves.size;
 
     for (int i = 0; i < n; ++i) {
         const Move& m = moves.m[i];
-        uint64_t score = 0;
+        int score = 0;
 
         if (m == hashMove) {
-            score = maxHistoryValue_ + 100;
+            score = (int)maxHistoryValue_ + 100;
         }
         else if (m.isCapture || m.promotion) {
             int cap = isGoodCapture(m, board);
-            score += (int64_t)cap; // keep sign influence
-            if (cap < 0) {
-                scored[i] = { m, score };
-                continue;
-            }
-            if (m.promotion) score += (uint64_t)getPieceValue(m.promotion);
-            score += maxHistoryValue_ + 1;
+            score += cap;
+
+            if (m.promotion) score += getPieceValue(m.promotion) + 1000; // promo bias
+            if (cap >= 0 || m.promotion) score += (int)maxHistoryValue_ + 1;
+            // else: keep negative captures low
         }
         else if (isKiller(m, depth)) {
-            score = maxHistoryValue_;
+            score = (int)maxHistoryValue_;
         }
         else if (cfg_.useHistoryHeuristic) {
             int idx = board.posToValue(m.from);
-            if (idx >= 0 && idx < 12) score = history_[idx][m.to];
+            if (idx >= 0 && idx < 12) score = (int)history_[idx][m.to];
         }
 
         scored[i] = { m, score };
     }
 
-    std::sort(scored, scored + n, [](const ScoredMove& a, const ScoredMove& b) {
+    std::sort(scored, scored + n, [](const LocalScored& a, const LocalScored& b) {
         return a.score > b.score;
     });
 
-    // write back into MoveList in sorted order
     for (int i = 0; i < n; ++i) {
-        moves.m[i] = scored[i].mv;
+        moves.m[i] = scored[i].m;
     }
 }
 
@@ -318,13 +318,6 @@ int Engine::evaluate(Board& board) const {
 
     const uint64_t fileMasks[8] = {
         0x0101010101010101ULL, 0x0202020202020202ULL, 0x0404040404040404ULL, 0x0808080808080808ULL,
-        0x1010101010101010ULL, 0x2020202020202020ULL, 0x4040404044040404ULL, 0x8080808080808080ULL
-    };
-    // FIX: your original masks are correct; the 0x404... line above is a typo risk.
-    // We must keep exact:
-    // We'll override with correct constant:
-    const uint64_t fileMasksFixed[8] = {
-        0x0101010101010101ULL, 0x0202020202020202ULL, 0x0404040404040404ULL, 0x0808080808080808ULL,
         0x1010101010101010ULL, 0x2020202020202020ULL, 0x4040404040404040ULL, 0x8080808080808080ULL
     };
 
@@ -403,13 +396,13 @@ int Engine::evaluate(Board& board) const {
         int whiteKingFile = (int)(ctz64(board.whiteKing) % 8);
         int blackKingFile = (int)(ctz64(board.blackKing) % 8);
 
-        uint64_t whiteFileMask = fileMasksFixed[whiteKingFile];
-        uint64_t blackFileMask = fileMasksFixed[blackKingFile];
+        uint64_t whiteFileMask = fileMasks[whiteKingFile];
+        uint64_t blackFileMask = fileMasks[blackKingFile];
 
-        if (whiteKingFile > 0) whiteFileMask |= fileMasksFixed[whiteKingFile - 1];
-        if (whiteKingFile < 7) whiteFileMask |= fileMasksFixed[whiteKingFile + 1];
-        if (blackKingFile > 0) blackFileMask |= fileMasksFixed[blackKingFile - 1];
-        if (blackKingFile < 7) blackFileMask |= fileMasksFixed[blackKingFile + 1];
+        if (whiteKingFile > 0) whiteFileMask |= fileMasks[whiteKingFile - 1];
+        if (whiteKingFile < 7) whiteFileMask |= fileMasks[whiteKingFile + 1];
+        if (blackKingFile > 0) blackFileMask |= fileMasks[blackKingFile - 1];
+        if (blackKingFile < 7) blackFileMask |= fileMasks[blackKingFile + 1];
 
         for (int rank = 1; rank <= 6; ++rank) {
             uint64_t wp = board.whitePawns & rankMasks[rank] & whiteFileMask;
@@ -457,8 +450,8 @@ int Engine::evaluate(Board& board) const {
 
     // doubled pawns
     for (int f = 0; f < 8; ++f) {
-        int wp = std::popcount(board.whitePawns & fileMasksFixed[f]);
-        int bp = std::popcount(board.blackPawns & fileMasksFixed[f]);
+        int wp = std::popcount(board.whitePawns & fileMasks[f]);
+        int bp = std::popcount(board.blackPawns & fileMasks[f]);
         if (wp > 1) result -= 20 * (wp - 1);
         if (bp > 1) result += 20 * (bp - 1);
     }
@@ -475,12 +468,12 @@ int Engine::evaluate(Board& board) const {
 
             for (int file = 0; file < 8; ++file) {
                 // white passed pawns: no black pawns ahead on same/adj files
-                uint64_t whitePawn = whiteRankPawns & fileMasksFixed[file];
+                uint64_t whitePawn = whiteRankPawns & fileMasks[file];
                 if (whitePawn) {
                     uint64_t files =
-                        fileMasksFixed[file] |
-                        (file > 0 ? fileMasksFixed[file - 1] : 0ULL) |
-                        (file < 7 ? fileMasksFixed[file + 1] : 0ULL);
+                        fileMasks[file] |
+                        (file > 0 ? fileMasks[file - 1] : 0ULL) |
+                        (file < 7 ? fileMasks[file + 1] : 0ULL);
 
                     uint64_t ahead = rankMasks[rank + 1] | rankMasks[rank + 2] | rankMasks[rank + 3] |
                                      rankMasks[rank + 4] | rankMasks[rank + 5] | rankMasks[rank + 6];
@@ -490,15 +483,16 @@ int Engine::evaluate(Board& board) const {
                 }
 
                 // black passed pawns: no white pawns ahead (towards rank 0)
-                uint64_t blackPawn = blackRankPawns & fileMasksFixed[file];
+                uint64_t blackPawn = blackRankPawns & fileMasks[file];
                 if (blackPawn) {
                     uint64_t files =
-                        fileMasksFixed[file] |
-                        (file > 0 ? fileMasksFixed[file - 1] : 0ULL) |
-                        (file < 7 ? fileMasksFixed[file + 1] : 0ULL);
+                        fileMasks[file] |
+                        (file > 0 ? fileMasks[file - 1] : 0ULL) |
+                        (file < 7 ? fileMasks[file + 1] : 0ULL);
 
-                    uint64_t ahead = rankMasks[6 - rank] | rankMasks[5 - rank] | rankMasks[4 - rank] |
-                                     rankMasks[3 - rank] | rankMasks[2 - rank] | rankMasks[1 - rank];
+                    int rBlack = 7 - rank;
+                    uint64_t ahead = 0ULL;
+                    for (int r2 = rBlack - 1; r2 >= 0; --r2) ahead |= rankMasks[r2];
 
                     uint64_t blockers = board.whitePawns & files & ahead;
                     if (!blockers) late -= passedPawnBonus[rank];
@@ -509,12 +503,12 @@ int Engine::evaluate(Board& board) const {
     }
 
     // pawns defending pawns (same)
-    uint64_t leftDefW  = (board.whitePawns & ~fileMasksFixed[7]) << 9;
-    uint64_t rightDefW = (board.whitePawns & ~fileMasksFixed[0]) << 7;
+    uint64_t leftDefW  = (board.whitePawns & ~fileMasks[7]) << 9;
+    uint64_t rightDefW = (board.whitePawns & ~fileMasks[0]) << 7;
     result += 15 * std::popcount((leftDefW | rightDefW) & board.whitePawns);
 
-    uint64_t leftDefB  = (board.blackPawns & ~fileMasksFixed[7]) >> 7;
-    uint64_t rightDefB = (board.blackPawns & ~fileMasksFixed[0]) >> 9;
+    uint64_t leftDefB  = (board.blackPawns & ~fileMasks[7]) >> 7;
+    uint64_t rightDefB = (board.blackPawns & ~fileMasks[0]) >> 9;
     result -= 15 * std::popcount((leftDefB | rightDefB) & board.blackPawns);
 
     // mobility
@@ -570,8 +564,17 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
     if (outOfTime()) { timedOut = true; return 0; }
     lastNodes_++;
 
+    if (ply > 0 && board.isThreefoldRepetition()) {
+        return 0;
+    }
+
+    if (ply >= 64) {
+        return evaluate(board);
+    }
+
     const bool sideToMoveInCheck = board.amIInCheck(board.whiteToMove);
     MoveList legalMoves;
+    board.generateAllMoves(legalMoves);
 
     if (legalMoves.size == 0) {
         // If in check -> checkmate. If not -> stalemate draw.
@@ -682,6 +685,7 @@ int Engine::search(Board& board,
     }
 
     const int originalAlpha = alpha;
+    const int originalBeta  = beta;
     bestMoveOut = Move(-1, -1);
 
     const uint64_t key = board.zobristHash;
@@ -732,46 +736,18 @@ int Engine::search(Board& board,
     std::vector<Move> quietTried;
     quietTried.reserve(32);
 
-
-    // Null move pruning (engine2-style)
-    if (cfg_.useNullMove && !board.amIInCheck(board.whiteToMove) && depth > 2 && isNullViable(board) && !lastIterationNull && depth != startDepth) {
-        Undo uNull;
-        board.makeNullMove(uNull);
-        int R = 2;
-
-        Move dummy;
-        int nm = search(board, depth - 1 - R, -beta, -beta + 1, startDepth, ply + 1, totalExtensions, true, dummy, timedOut);
-        board.undoNullMove(uNull);
-
-        if (timedOut) return 0;
-
-        int nullScore = -nm;
-
-        if (nullScore >= beta) {
-            bestMoveOut = Move(-1, -1);
-            return beta;
-        }
-
-        // mate-threat-ish extension (your engine2 behavior)
-        if (totalExtensions < cfg_.maxExtensionsPerLine && depth <= 3) {
-            if (nullScore + 100 <= alpha) {
-                extensionBase += 1;
-            }
-        }
-    }
-
     int bestScore = -1000000;
 
     for (int i = 0; i < moves.size; ++i) {
         Move& move = moves.m[i];
 
-        bool quiet = (!move.isCapture && !move.promotion);
+        Undo u;
+        board.makeMove(move, u);
+
+        const bool quiet = (!move.isCapture && !move.promotion);
         if (cfg_.useHistoryHeuristic && quiet) {
             quietTried.push_back(move);
         }
-
-        Undo u;
-        board.makeMove(move, u);
 
         int ext = extensionBase;
 
@@ -782,8 +758,8 @@ int Engine::search(Board& board,
         ext = std::clamp(ext, 0, 2);
 
         int reduction = 0;
-        if (cfg_.useLMR && depth >= 4 && !move.isCapture && ext == 0) {
-            if (i >= 3) reduction = 1;
+        if (cfg_.useLMR && depth >= 4 && !move.isCapture && ext == 0 && i >= 3 && std::abs(alpha) < MATE_THRESHOLD - 500 && !board.amIInCheck(board.whiteToMove)) {
+            reduction = 1;
         }
 
         Move childBest;
@@ -791,7 +767,6 @@ int Engine::search(Board& board,
 
         int score = -child;
 
-        // verify reduced move
         if (!timedOut && reduction == 1 && score > alpha) {
             child = search(board, depth - 1 + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
             score = -child;
@@ -809,12 +784,11 @@ int Engine::search(Board& board,
         alpha = std::max(alpha, score);
 
         if (alpha >= beta) {
-            // cutoff: reward this quiet move heavily, penalize other quiet moves tried
             if (quiet) {
                 recordKiller(move, ply);
 
-                int bonus = depth * depth;// or 2*depth*depth, tune later
-                int malus = bonus / 4;// small penalty
+                int bonus = depth * depth;
+                int malus = bonus / 4;
 
                 updateHistory(board, move.from, move.to, bonus);
 
@@ -828,10 +802,10 @@ int Engine::search(Board& board,
     }
 
     // TT store
-    TTFlag flag = HASH_FLAG_EXACT;
+    TTFlag flag;
     if (bestScore <= originalAlpha) flag = HASH_FLAG_UPPER;
-    else if (bestScore >= beta)     flag = HASH_FLAG_LOWER;
-    else                            flag = HASH_FLAG_EXACT;
+    else if (bestScore >= originalBeta) flag = HASH_FLAG_LOWER;
+    else flag = HASH_FLAG_EXACT;
 
     storeTT(key, scoreToTT(bestScore, ply), flag, bestMoveOut, depth);
 

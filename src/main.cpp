@@ -98,7 +98,7 @@ void playAgainstComputer() {
 
     Board board;
     board.createBoard();
-    // board.createBoardFromFEN("8/1p5p/p1pP3k/7p/P3r1P1/7P/2K5/2R5 w - - 0 1");
+    //board.createBoardFromFEN("2r3k1/2pb2pp/prq1pp2/Q2p4/1P1PnB2/P1p1PN1P/2P2PP1/2KR1R2 w - - 0 1");
     board.printBoard();
 
     BoardDisplay display;

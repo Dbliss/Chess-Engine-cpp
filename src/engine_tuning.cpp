@@ -564,7 +564,7 @@ int main() {
     EngineConfig cfgB = cfgA;
 
     // Example difference knobs (edit however you want)
-    cfgA.quiescenceIncludeChecks = true;
+    //cfgB.quiescenceIncludeChecks = true;
 
     Engine engineA(cfgA);
     Engine engineB(cfgB);

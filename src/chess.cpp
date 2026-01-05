@@ -180,8 +180,6 @@ static inline Bitboard bishop_attacks_ray(int from, Bitboard occ) {
 }
 
 static inline bool isSquareAttacked_fast(int targetSquare, bool attackersAreWhite, Bitboard occupiedSquares, Bitboard attackerPawns, Bitboard attackerKnights, Bitboard attackerBishops, Bitboard attackerRooks, Bitboard attackerQueens, Bitboard attackerKing) {
-    init_attack_tables_once();
-
     const int pawnIdx = attackersAreWhite ? 0 : 1;
 
     // pawn attackers (no shifting)
@@ -222,22 +220,10 @@ static inline bool isSquareAttacked_fast(int targetSquare, bool attackersAreWhit
     return false;
 }
 
-std::string numToBoardPosition(int num) {
-    // Ensure the number is within valid range
-    if (num < 0 || num > 63) {
-        return "Invalid num";
-    }
-
-    // Calculate the rank and file
-    int rank = num / 8;
-    int file = num % 8;
-
-    // Convert rank and file to chess notation
-    char rankChar = '1' + rank;
-    char fileChar = 'h' - file;
-
-    // Return the board position as a string
-    return std::string(1, fileChar) + rankChar;
+static inline char pieceTypeLower(char c) {
+    // returns 'p','n','b','r','q','k' regardless of color case
+    if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+    return c;
 }
 
 static inline bool step_ok(int from, int dir, int& to) {
@@ -254,6 +240,69 @@ static inline bool step_ok(int from, int dir, int& to) {
         return false;
 
     return true;
+}
+
+static inline bool isSquareAttacked(int targetSquare, bool attackersAreWhite, Bitboard occupiedSquares, Bitboard attackerPawns, Bitboard attackerKnights, Bitboard attackerBishops, Bitboard attackerRooks, Bitboard attackerQueens, Bitboard attackerKing) {
+    const Bitboard targetMask = 1ULL << targetSquare;
+
+    // Pawn attacks (match your engine's shift directions)
+    Bitboard pawnAttacks = attackersAreWhite
+        ? (((attackerPawns << 7) & NOT_A_FILE) | ((attackerPawns << 9) & NOT_H_FILE))
+        : (((attackerPawns >> 7) & NOT_H_FILE) | ((attackerPawns >> 9) & NOT_A_FILE));
+
+    if (pawnAttacks & targetMask) return true;
+
+    // Knight attacks
+    const int knightSteps[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
+    for (int step : knightSteps) {
+        int sq = targetSquare + step;
+        if (sq >= 0 && sq < 64 && std::abs((targetSquare % 8) - (sq % 8)) <= 2) {
+            if (attackerKnights & (1ULL << sq)) return true;
+        }
+    }
+
+    // Bishop/queen diagonal attacks (use occupiedSquares for blockers)
+    const int bishopDirs[4] = { 9, 7, -9, -7 };
+    for (int dir : bishopDirs) {
+        int sq = targetSquare;
+        while (true) {
+            sq += dir;
+            if (sq < 0 || sq >= 64 ||
+                (sq % 8 == 0 && (dir == 9 || dir == -7)) ||
+                (sq % 8 == 7 && (dir == 7 || dir == -9))) break;
+
+            Bitboard sqMask = 1ULL << sq;
+            if ((attackerBishops | attackerQueens) & sqMask) return true;
+            if (occupiedSquares & sqMask) break; // blocked by any piece
+        }
+    }
+
+    // Rook/queen straight attacks (use occupiedSquares for blockers)
+    const int rookDirs[4] = { 8, -8, 1, -1 };
+    for (int dir : rookDirs) {
+        int sq = targetSquare;
+        while (true) {
+            sq += dir;
+            if (sq < 0 || sq >= 64 ||
+                (sq % 8 == 0 && dir == 1) ||
+                (sq % 8 == 7 && dir == -1)) break;
+
+            Bitboard sqMask = 1ULL << sq;
+            if ((attackerRooks | attackerQueens) & sqMask) return true;
+            if (occupiedSquares & sqMask) break; // blocked
+        }
+    }
+
+    // King attacks (adjacent squares)
+    const int kingSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
+    for (int step : kingSteps) {
+        int sq = targetSquare + step;
+        if (sq >= 0 && sq < 64 && std::abs((targetSquare % 8) - (sq % 8)) <= 1) {
+            if (attackerKing & (1ULL << sq)) return true;
+        }
+    }
+
+    return false;
 }
 
 Bitboard Board::computePinnedMask(bool forWhite) const {
@@ -339,21 +388,30 @@ void Board::createBoard() {
     blackLRookMoved = false;
     blackRRookMoved = false;
 
-    // Build mailbox first, then hash (since hash uses getPieceAt())
     rebuildMailbox();
     zobristHash = generateZobristHash();
 
+    // (Optional) keep if you still use it outside search:
     positionHistory.clear();
-    updatePositionHistory(true);
+
+    // --- NEW: repetition stack init ---
+    repPly = 0;
+    repIrrevIndex = 0;
+    repStack[repPly++] = zobristHash;
 }
 
 void Board::createBoardFromFEN(const std::string& fen) {
     parseFEN(fen, *this);
 
     zobristHash = generateZobristHash();
+
+    // (Optional) keep if you still use it outside search:
     positionHistory.clear();
 
-    updatePositionHistory(true);
+    // --- NEW: repetition stack init ---
+    repPly = 0;
+    repIrrevIndex = 0;
+    repStack[repPly++] = zobristHash;
 }
 
 void Board::printBoard() {
@@ -432,68 +490,23 @@ void Board::printBoard() {
     // Output FEN string
     std::cout << "FEN: " << fenStream.str() << std::endl;
 }
-   
-static inline bool isSquareAttacked(int targetSquare, bool attackersAreWhite, Bitboard occupiedSquares, Bitboard attackerPawns, Bitboard attackerKnights, Bitboard attackerBishops, Bitboard attackerRooks, Bitboard attackerQueens, Bitboard attackerKing) {
-    const Bitboard targetMask = 1ULL << targetSquare;
 
-    // Pawn attacks (match your engine's shift directions)
-    Bitboard pawnAttacks = attackersAreWhite
-        ? (((attackerPawns << 7) & NOT_A_FILE) | ((attackerPawns << 9) & NOT_H_FILE))
-        : (((attackerPawns >> 7) & NOT_H_FILE) | ((attackerPawns >> 9) & NOT_A_FILE));
-
-    if (pawnAttacks & targetMask) return true;
-
-    // Knight attacks
-    const int knightSteps[8] = { 17, 15, 10, 6, -17, -15, -10, -6 };
-    for (int step : knightSteps) {
-        int sq = targetSquare + step;
-        if (sq >= 0 && sq < 64 && std::abs((targetSquare % 8) - (sq % 8)) <= 2) {
-            if (attackerKnights & (1ULL << sq)) return true;
-        }
+std::string numToBoardPosition(int num) {
+    // Ensure the number is within valid range
+    if (num < 0 || num > 63) {
+        return "Invalid num";
     }
 
-    // Bishop/queen diagonal attacks (use occupiedSquares for blockers)
-    const int bishopDirs[4] = { 9, 7, -9, -7 };
-    for (int dir : bishopDirs) {
-        int sq = targetSquare;
-        while (true) {
-            sq += dir;
-            if (sq < 0 || sq >= 64 ||
-                (sq % 8 == 0 && (dir == 9 || dir == -7)) ||
-                (sq % 8 == 7 && (dir == 7 || dir == -9))) break;
+    // Calculate the rank and file
+    int rank = num / 8;
+    int file = num % 8;
 
-            Bitboard sqMask = 1ULL << sq;
-            if ((attackerBishops | attackerQueens) & sqMask) return true;
-            if (occupiedSquares & sqMask) break; // blocked by any piece
-        }
-    }
+    // Convert rank and file to chess notation
+    char rankChar = '1' + rank;
+    char fileChar = 'h' - file;
 
-    // Rook/queen straight attacks (use occupiedSquares for blockers)
-    const int rookDirs[4] = { 8, -8, 1, -1 };
-    for (int dir : rookDirs) {
-        int sq = targetSquare;
-        while (true) {
-            sq += dir;
-            if (sq < 0 || sq >= 64 ||
-                (sq % 8 == 0 && dir == 1) ||
-                (sq % 8 == 7 && dir == -1)) break;
-
-            Bitboard sqMask = 1ULL << sq;
-            if ((attackerRooks | attackerQueens) & sqMask) return true;
-            if (occupiedSquares & sqMask) break; // blocked
-        }
-    }
-
-    // King attacks (adjacent squares)
-    const int kingSteps[8] = { 8, -8, 1, -1, 9, 7, -9, -7 };
-    for (int step : kingSteps) {
-        int sq = targetSquare + step;
-        if (sq >= 0 && sq < 64 && std::abs((targetSquare % 8) - (sq % 8)) <= 1) {
-            if (attackerKing & (1ULL << sq)) return true;
-        }
-    }
-
-    return false;
+    // Return the board position as a string
+    return std::string(1, fileChar) + rankChar;
 }
 
 void Board::generatePawnMoves(MoveList& moves, Bitboard pawns, Bitboard ownPieces, Bitboard opponentPieces) {
@@ -905,6 +918,8 @@ bool Board::amIInCheck(bool player) {
 
 void Board::makeNullMove(Undo& u) {
     // save state
+    u.prevHash = zobristHash;
+
     u.prevEnPassantTarget = enPassantTarget;
 
     u.prevWhiteKingMoved  = whiteKingMoved;
@@ -915,18 +930,22 @@ void Board::makeNullMove(Undo& u) {
     u.prevBlackLRookMoved = blackLRookMoved;
     u.prevBlackRRookMoved = blackRRookMoved;
 
-    // null move clears EP
+    // remove old EP from hash then clear EP
+    if (enPassantTarget) {
+        int file = (lsb_index(enPassantTarget) & 7);
+        zobristHash ^= zobristEnPassant[file];
+    }
     enPassantTarget = 0;
 
     // toggle side
     whiteToMove = !whiteToMove;
+    zobristHash ^= zobristSideToMove;
+
+    // NOTE: do NOT push null positions onto repStack unless you also disable repetition checks in null-search
 }
 
 void Board::undoNullMove(const Undo& u) {
-    // toggle side back
-    whiteToMove = !whiteToMove;
-
-    // restore state
+    // restore state exactly
     enPassantTarget = u.prevEnPassantTarget;
 
     whiteKingMoved  = u.prevWhiteKingMoved;
@@ -936,6 +955,10 @@ void Board::undoNullMove(const Undo& u) {
     blackKingMoved  = u.prevBlackKingMoved;
     blackLRookMoved = u.prevBlackLRookMoved;
     blackRRookMoved = u.prevBlackRRookMoved;
+
+    // restore side + hash in O(1)
+    whiteToMove = !whiteToMove;
+    zobristHash = u.prevHash;
 }
 
 void Board::makeMove(Move& move, Undo& u) {
@@ -952,10 +975,12 @@ void Board::makeMove(Move& move, Undo& u) {
     u.prevBlackLRookMoved = blackLRookMoved;
     u.prevBlackRRookMoved = blackRRookMoved;
 
+    u.prevRepIrrevIndex = repIrrevIndex;
+
     u.capturedPiece = 0;
     u.wasEnPassant  = false;
 
-    // ---- NEW: mailbox undo init ----
+    // ---- mailbox undo init ----
     u.movedPieceChar = pieceAt[move.from];
     u.capturedPieceChar = ' ';
     u.capturedSquare = -1;
@@ -969,15 +994,29 @@ void Board::makeMove(Move& move, Undo& u) {
     // EP exists for ONE ply only
     enPassantTarget = 0;
 
-    Bitboard fromMask = 1ULL << move.from;
-    Bitboard toMask   = 1ULL << move.to;
+    const Bitboard fromMask = 1ULL << move.from;
+    const Bitboard toMask   = 1ULL << move.to;
 
-    // ---- NEW: mailbox capture removal (before we overwrite destination) ----
+    // ----------------- DERIVE CAPTURE (robust against book/external moves) -----------------
+    const Bitboard oppPieces = whiteToMove ? blackPieces : whitePieces;
+
+    const bool pawnMover = (u.movedPieceChar == 'p' || u.movedPieceChar == 'P');
+    const bool isEpSquare = (u.prevEnPassantTarget & toMask) != 0;
+
+    // EP destination square is empty in mailbox, and pawn must move diagonally to it
+    const int delta = move.to - move.from;
+    const bool epDeltaOk = whiteToMove ? (delta == 7 || delta == 9) : (delta == -7 || delta == -9);
+
+    const bool isEpCap = pawnMover && isEpSquare && (pieceAt[move.to] == ' ') && epDeltaOk;
+    const bool isNormCap = (oppPieces & toMask) != 0;
+
+    move.isCapture = (isEpCap || isNormCap);
+
+    // ---- mailbox capture removal (before we overwrite destination) ----
     if (move.isCapture) {
-        // EP capture: destination is EP square, victim is behind it
-        if ((u.prevEnPassantTarget & toMask) && (u.movedPieceChar == 'p' || u.movedPieceChar == 'P')) {
-            int victimSq = whiteToMove ? (move.to - 8) : (move.to + 8);
-            u.wasEnPassant = true; // consistent with your bitboard logic
+        if (isEpCap) {
+            const int victimSq = whiteToMove ? (move.to - 8) : (move.to + 8);
+            u.wasEnPassant = true;
             u.capturedSquare = victimSq;
             u.capturedPieceChar = pieceAt[victimSq];
             pieceAt[victimSq] = ' ';
@@ -988,7 +1027,7 @@ void Board::makeMove(Move& move, Undo& u) {
         }
     }
 
-    // ---- NEW: mailbox move piece from->to (promotion handled) ----
+    // ---- mailbox move piece from->to (promotion handled) ----
     pieceAt[move.from] = ' ';
 
     char placed = u.movedPieceChar;
@@ -999,180 +1038,230 @@ void Board::makeMove(Move& move, Undo& u) {
     }
     pieceAt[move.to] = placed;
 
-    // ---------------- EXISTING BITBOARD/ZOBRIST LOGIC (unchanged) ----------------
+    // ---------------- BITBOARD/ZOBRIST MOVE (SWITCH ON MAILBOX CHAR) ----------------
     if (whiteToMove) {
-        // ---------------- WHITE MOVE ----------------
-        if (whitePawns & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('p')][move.from];
+        // WHITE pieces are lowercase in your mailbox
+        switch (u.movedPieceChar) {
+            case 'p': {
+                zobristHash ^= zobristTable[getPieceIndex('p')][move.from];
 
-            if (move.to == move.from + 16)
-                enPassantTarget = 1ULL << (move.from + 8);
+                if (move.to == move.from + 16)
+                    enPassantTarget = 1ULL << (move.from + 8);
 
-            if (move.promotion) {
-                zobristHash ^= zobristTable[getPieceIndex(move.promotion)][move.to];
-                whitePawns ^= fromMask;
-                switch (move.promotion) {
-                    case 'q': whiteQueens  |= toMask; break;
-                    case 'r': whiteRooks   |= toMask; break;
-                    case 'b': whiteBishops |= toMask; break;
-                    case 'n': whiteKnights |= toMask; break;
+                if (move.promotion) {
+                    zobristHash ^= zobristTable[getPieceIndex(move.promotion)][move.to];
+                    whitePawns ^= fromMask;
+                    switch (move.promotion) {
+                        case 'q': whiteQueens  |= toMask; break;
+                        case 'r': whiteRooks   |= toMask; break;
+                        case 'b': whiteBishops |= toMask; break;
+                        case 'n': whiteKnights |= toMask; break;
+                    }
+                } else {
+                    zobristHash ^= zobristTable[getPieceIndex('p')][move.to];
+                    whitePawns ^= fromMask | toMask;
                 }
-            } else {
-                zobristHash ^= zobristTable[getPieceIndex('p')][move.to];
-                whitePawns ^= fromMask | toMask;
+                break;
             }
-        }
-        else if (whiteRooks & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('r')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('r')][move.to];
-            whiteRooks ^= fromMask | toMask;
-            if (move.from == 0) whiteRRookMoved = true;
-            if (move.from == 7) whiteLRookMoved = true;
-        }
-        else if (whiteKnights & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('n')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('n')][move.to];
-            whiteKnights ^= fromMask | toMask;
-        }
-        else if (whiteBishops & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('b')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('b')][move.to];
-            whiteBishops ^= fromMask | toMask;
-        }
-        else if (whiteQueens & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('q')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('q')][move.to];
-            whiteQueens ^= fromMask | toMask;
-        }
-        else if (whiteKing & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('k')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('k')][move.to];
-
-            whiteKing ^= fromMask | toMask;
-            whiteKingMoved = true;
-
-            if (move.to == move.from - 2) {
-                zobristHash ^= zobristTable[getPieceIndex('r')][0];
-                zobristHash ^= zobristTable[getPieceIndex('r')][2];
-                whiteRooks ^= 0x0000000000000005ULL;
-
-                // ---- NEW: mailbox rook shift for castling ----
-                pieceAt[2] = pieceAt[0];
-                pieceAt[0] = ' ';
+            case 'r': {
+                zobristHash ^= zobristTable[getPieceIndex('r')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('r')][move.to];
+                whiteRooks ^= fromMask | toMask;
+                if (move.from == 0) whiteRRookMoved = true;
+                if (move.from == 7) whiteLRookMoved = true;
+                break;
             }
-            else if (move.to == move.from + 2) {
-                zobristHash ^= zobristTable[getPieceIndex('r')][7];
-                zobristHash ^= zobristTable[getPieceIndex('r')][4];
-                whiteRooks ^= 0x0000000000000090ULL;
-
-                // ---- NEW: mailbox rook shift for castling ----
-                pieceAt[4] = pieceAt[7];
-                pieceAt[7] = ' ';
+            case 'n': {
+                zobristHash ^= zobristTable[getPieceIndex('n')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('n')][move.to];
+                whiteKnights ^= fromMask | toMask;
+                break;
             }
+            case 'b': {
+                zobristHash ^= zobristTable[getPieceIndex('b')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('b')][move.to];
+                whiteBishops ^= fromMask | toMask;
+                break;
+            }
+            case 'q': {
+                zobristHash ^= zobristTable[getPieceIndex('q')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('q')][move.to];
+                whiteQueens ^= fromMask | toMask;
+                break;
+            }
+            case 'k': {
+                zobristHash ^= zobristTable[getPieceIndex('k')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('k')][move.to];
+
+                whiteKing ^= fromMask | toMask;
+                whiteKingMoved = true;
+
+                // castling rook shift (keep your existing)
+                if (move.to == move.from - 2) {
+                    zobristHash ^= zobristTable[getPieceIndex('r')][0];
+                    zobristHash ^= zobristTable[getPieceIndex('r')][2];
+                    whiteRooks ^= 0x0000000000000005ULL;
+
+                    pieceAt[2] = pieceAt[0];
+                    pieceAt[0] = ' ';
+                } else if (move.to == move.from + 2) {
+                    zobristHash ^= zobristTable[getPieceIndex('r')][7];
+                    zobristHash ^= zobristTable[getPieceIndex('r')][4];
+                    whiteRooks ^= 0x0000000000000090ULL;
+
+                    pieceAt[4] = pieceAt[7];
+                    pieceAt[7] = ' ';
+                }
+                break;
+            }
+            default:
+                // mailbox + bitboards desynced
+                break;
         }
 
+        // ---------------- CAPTURE RESOLUTION USING MAILBOX CAPTURE CHAR ----------------
         if (move.isCapture) {
-            if      (blackPawns   & toMask) { u.capturedPiece='p'; zobristHash ^= zobristTable[getPieceIndex('P')][move.to]; blackPawns   &=~toMask; }
-            else if (blackRooks   & toMask) { u.capturedPiece='r'; zobristHash ^= zobristTable[getPieceIndex('R')][move.to]; blackRooks   &=~toMask; }
-            else if (blackKnights & toMask) { u.capturedPiece='n'; zobristHash ^= zobristTable[getPieceIndex('N')][move.to]; blackKnights &=~toMask; }
-            else if (blackBishops & toMask) { u.capturedPiece='b'; zobristHash ^= zobristTable[getPieceIndex('B')][move.to]; blackBishops &=~toMask; }
-            else if (blackQueens  & toMask) { u.capturedPiece='q'; zobristHash ^= zobristTable[getPieceIndex('Q')][move.to]; blackQueens  &=~toMask; }
-            else if (blackKing    & toMask) { u.capturedPiece='k'; zobristHash ^= zobristTable[getPieceIndex('K')][move.to]; blackKing    &=~toMask; }
-            else if (u.prevEnPassantTarget & toMask) {
-                u.wasEnPassant  = true;
-                u.capturedPiece = 'p';
-                const int victimSq = move.to - 8;
+            if (u.wasEnPassant) {
+                const int victimSq = u.capturedSquare;
+                const Bitboard vMask = 1ULL << victimSq;
+
+                // victim is a BLACK pawn in your mailbox => 'P'
                 zobristHash ^= zobristTable[getPieceIndex('P')][victimSq];
-                blackPawns &= ~(toMask >> 8);
-            }
-        }
-    }
-    else {
-        // ---------------- BLACK MOVE ----------------
-        if (blackPawns & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('P')][move.from];
-
-            if (move.to == move.from - 16)
-                enPassantTarget = 1ULL << (move.from - 8);
-
-            if (move.promotion) {
-                const char promo = (char)std::toupper((unsigned char)move.promotion);
-                zobristHash ^= zobristTable[getPieceIndex(promo)][move.to];
-
-                blackPawns ^= fromMask;
-                switch (move.promotion) {
-                    case 'q': blackQueens  |= toMask; break;
-                    case 'r': blackRooks   |= toMask; break;
-                    case 'b': blackBishops |= toMask; break;
-                    case 'n': blackKnights |= toMask; break;
-                }
+                blackPawns &= ~vMask;
+                u.capturedPiece = 'p';
             } else {
-                zobristHash ^= zobristTable[getPieceIndex('P')][move.to];
-                blackPawns ^= fromMask | toMask;
+                const char capChar = u.capturedPieceChar; // black piece => 'P','N','B','R','Q','K'
+                if (capChar != ' ') {
+                    zobristHash ^= zobristTable[getPieceIndex(capChar)][move.to];
+                    u.capturedPiece = pieceTypeLower(capChar);
+
+                    switch (capChar) {
+                        case 'P': blackPawns   &= ~toMask; break;
+                        case 'R': blackRooks   &= ~toMask; break;
+                        case 'N': blackKnights &= ~toMask; break;
+                        case 'B': blackBishops &= ~toMask; break;
+                        case 'Q': blackQueens  &= ~toMask; break;
+                        case 'K': blackKing    &= ~toMask; break;
+                    }
+
+                    // captured rook on original square clears castling rights
+                    if (capChar == 'R') {
+                        if (move.to == 56) blackRRookMoved = true;
+                        if (move.to == 63) blackLRookMoved = true;
+                    }
+                }
             }
         }
-        else if (blackRooks & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('R')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('R')][move.to];
-            blackRooks ^= fromMask | toMask;
-            if (move.from == 56) blackRRookMoved = true;
-            if (move.from == 63) blackLRookMoved = true;
-        }
-        else if (blackKnights & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('N')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('N')][move.to];
-            blackKnights ^= fromMask | toMask;
-        }
-        else if (blackBishops & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('B')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('B')][move.to];
-            blackBishops ^= fromMask | toMask;
-        }
-        else if (blackQueens & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('Q')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('Q')][move.to];
-            blackQueens ^= fromMask | toMask;
-        }
-        else if (blackKing & fromMask) {
-            zobristHash ^= zobristTable[getPieceIndex('K')][move.from];
-            zobristHash ^= zobristTable[getPieceIndex('K')][move.to];
+    } else {
+        // BLACK pieces are uppercase in your mailbox
+        switch (u.movedPieceChar) {
+            case 'P': {
+                zobristHash ^= zobristTable[getPieceIndex('P')][move.from];
 
-            blackKing ^= fromMask | toMask;
-            blackKingMoved = true;
+                if (move.to == move.from - 16)
+                    enPassantTarget = 1ULL << (move.from - 8);
 
-            if (move.to == move.from - 2) {
-                zobristHash ^= zobristTable[getPieceIndex('R')][56];
-                zobristHash ^= zobristTable[getPieceIndex('R')][58];
-                blackRooks ^= 0x0500000000000000ULL;
+                if (move.promotion) {
+                    const char promo = (char)std::toupper((unsigned char)move.promotion);
+                    zobristHash ^= zobristTable[getPieceIndex(promo)][move.to];
 
-                // ---- NEW: mailbox rook shift for castling ----
-                pieceAt[58] = pieceAt[56];
-                pieceAt[56] = ' ';
+                    blackPawns ^= fromMask;
+                    switch (move.promotion) {
+                        case 'q': blackQueens  |= toMask; break;
+                        case 'r': blackRooks   |= toMask; break;
+                        case 'b': blackBishops |= toMask; break;
+                        case 'n': blackKnights |= toMask; break;
+                    }
+                } else {
+                    zobristHash ^= zobristTable[getPieceIndex('P')][move.to];
+                    blackPawns ^= fromMask | toMask;
+                }
+                break;
             }
-            else if (move.to == move.from + 2) {
-                zobristHash ^= zobristTable[getPieceIndex('R')][63];
-                zobristHash ^= zobristTable[getPieceIndex('R')][60];
-                blackRooks ^= 0x9000000000000000ULL;
-
-                // ---- NEW: mailbox rook shift for castling ----
-                pieceAt[60] = pieceAt[63];
-                pieceAt[63] = ' ';
+            case 'R': {
+                zobristHash ^= zobristTable[getPieceIndex('R')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('R')][move.to];
+                blackRooks ^= fromMask | toMask;
+                if (move.from == 56) blackRRookMoved = true;
+                if (move.from == 63) blackLRookMoved = true;
+                break;
             }
+            case 'N': {
+                zobristHash ^= zobristTable[getPieceIndex('N')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('N')][move.to];
+                blackKnights ^= fromMask | toMask;
+                break;
+            }
+            case 'B': {
+                zobristHash ^= zobristTable[getPieceIndex('B')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('B')][move.to];
+                blackBishops ^= fromMask | toMask;
+                break;
+            }
+            case 'Q': {
+                zobristHash ^= zobristTable[getPieceIndex('Q')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('Q')][move.to];
+                blackQueens ^= fromMask | toMask;
+                break;
+            }
+            case 'K': {
+                zobristHash ^= zobristTable[getPieceIndex('K')][move.from];
+                zobristHash ^= zobristTable[getPieceIndex('K')][move.to];
+
+                blackKing ^= fromMask | toMask;
+                blackKingMoved = true;
+
+                if (move.to == move.from - 2) {
+                    zobristHash ^= zobristTable[getPieceIndex('R')][56];
+                    zobristHash ^= zobristTable[getPieceIndex('R')][58];
+                    blackRooks ^= 0x0500000000000000ULL;
+
+                    pieceAt[58] = pieceAt[56];
+                    pieceAt[56] = ' ';
+                } else if (move.to == move.from + 2) {
+                    zobristHash ^= zobristTable[getPieceIndex('R')][63];
+                    zobristHash ^= zobristTable[getPieceIndex('R')][60];
+                    blackRooks ^= 0x9000000000000000ULL;
+
+                    pieceAt[60] = pieceAt[63];
+                    pieceAt[63] = ' ';
+                }
+                break;
+            }
+            default:
+                break;
         }
 
         if (move.isCapture) {
-            if      (whitePawns   & toMask) { u.capturedPiece='p'; zobristHash ^= zobristTable[getPieceIndex('p')][move.to]; whitePawns   &=~toMask; }
-            else if (whiteRooks   & toMask) { u.capturedPiece='r'; zobristHash ^= zobristTable[getPieceIndex('r')][move.to]; whiteRooks   &=~toMask; }
-            else if (whiteKnights & toMask) { u.capturedPiece='n'; zobristHash ^= zobristTable[getPieceIndex('n')][move.to]; whiteKnights &=~toMask; }
-            else if (whiteBishops & toMask) { u.capturedPiece='b'; zobristHash ^= zobristTable[getPieceIndex('b')][move.to]; whiteBishops &=~toMask; }
-            else if (whiteQueens  & toMask) { u.capturedPiece='q'; zobristHash ^= zobristTable[getPieceIndex('q')][move.to]; whiteQueens  &=~toMask; }
-            else if (whiteKing    & toMask) { u.capturedPiece='k'; zobristHash ^= zobristTable[getPieceIndex('k')][move.to]; whiteKing    &=~toMask; }
-            else if (u.prevEnPassantTarget & toMask) {
-                u.wasEnPassant  = true;
-                u.capturedPiece = 'p';
-                const int victimSq = move.to + 8;
+            if (u.wasEnPassant) {
+                const int victimSq = u.capturedSquare;
+                const Bitboard vMask = 1ULL << victimSq;
+
+                // victim is a WHITE pawn in your mailbox => 'p'
                 zobristHash ^= zobristTable[getPieceIndex('p')][victimSq];
-                whitePawns &= ~(toMask << 8);
+                whitePawns &= ~vMask;
+                u.capturedPiece = 'p';
+            } else {
+                const char capChar = u.capturedPieceChar; // white piece => 'p','n','b','r','q','k'
+                if (capChar != ' ') {
+                    zobristHash ^= zobristTable[getPieceIndex(capChar)][move.to];
+                    u.capturedPiece = pieceTypeLower(capChar);
+
+                    switch (capChar) {
+                        case 'p': whitePawns   &= ~toMask; break;
+                        case 'r': whiteRooks   &= ~toMask; break;
+                        case 'n': whiteKnights &= ~toMask; break;
+                        case 'b': whiteBishops &= ~toMask; break;
+                        case 'q': whiteQueens  &= ~toMask; break;
+                        case 'k': whiteKing    &= ~toMask; break;
+                    }
+
+                    // captured rook on original square clears castling rights
+                    if (capChar == 'r') {
+                        if (move.to == 0) whiteRRookMoved = true;
+                        if (move.to == 7) whiteLRookMoved = true;
+                    }
+                }
             }
         }
     }
@@ -1192,12 +1281,28 @@ void Board::makeMove(Move& move, Undo& u) {
     if (u.prevBlackRRookMoved != blackRRookMoved) zobristHash ^= zobristCastling[4];
     if (u.prevBlackLRookMoved != blackLRookMoved) zobristHash ^= zobristCastling[5];
 
+    // recompute aggregates
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
     // toggle side
     whiteToMove = !whiteToMove;
     zobristHash ^= zobristSideToMove;
+
+    // ---------------- repetition stack push + irreversible boundary ----------------
+    const bool movedPawn2 = pawnMover;
+    const bool castlingRightsChanged =
+        (u.prevWhiteKingMoved  != whiteKingMoved)  ||
+        (u.prevWhiteRRookMoved != whiteRRookMoved) ||
+        (u.prevWhiteLRookMoved != whiteLRookMoved) ||
+        (u.prevBlackKingMoved  != blackKingMoved)  ||
+        (u.prevBlackRRookMoved != blackRRookMoved) ||
+        (u.prevBlackLRookMoved != blackLRookMoved);
+
+    const bool irreversible = move.isCapture || movedPawn2 || move.promotion || castlingRightsChanged;
+
+    repStack[repPly++] = zobristHash;
+    if (irreversible) repIrrevIndex = repPly - 1;
 }
 
 void Board::undoMove(const Move& move, const Undo& u) {
@@ -1293,30 +1398,24 @@ void Board::undoMove(const Move& move, const Undo& u) {
     whitePieces = whitePawns | whiteRooks | whiteKnights | whiteBishops | whiteQueens | whiteKing;
     blackPieces = blackPawns | blackRooks | blackKnights | blackBishops | blackQueens | blackKing;
 
-    // ---------------- NEW: MAILBOX UNDO ----------------
-    // At this point, whiteToMove is still "side to move after the move" (i.e. opposite of mover)
+    // ---------------- MAILBOX UNDO ----------------
     const bool moverWasWhite = !whiteToMove;
 
-    // clear destination, restore mover to from
     pieceAt[move.to] = ' ';
     pieceAt[move.from] = u.movedPieceChar;
 
-    // restore captured piece if any (normal capture or EP)
     if (u.capturedSquare != -1) {
         pieceAt[u.capturedSquare] = u.capturedPieceChar;
     }
 
-    // undo castling rook shift in mailbox
     const char kingChar = moverWasWhite ? 'k' : 'K';
     if (u.movedPieceChar == kingChar) {
         if (move.to == move.from - 2) {
-            // rook was moved: (white: 0->2, black: 56->58)
             int rookFrom = moverWasWhite ? 2 : 58;
             int rookTo   = moverWasWhite ? 0 : 56;
             pieceAt[rookTo] = pieceAt[rookFrom];
             pieceAt[rookFrom] = ' ';
         } else if (move.to == move.from + 2) {
-            // rook was moved: (white: 7->4, black: 63->60)
             int rookFrom = moverWasWhite ? 4 : 60;
             int rookTo   = moverWasWhite ? 7 : 63;
             pieceAt[rookTo] = pieceAt[rookFrom];
@@ -1329,6 +1428,10 @@ void Board::undoMove(const Move& move, const Undo& u) {
 
     // Perfect O(1) restore
     zobristHash = u.prevHash;
+
+    // ---------------- NEW: repetition stack pop + restore boundary ----------------
+    if (repPly > 0) --repPly;
+    repIrrevIndex = u.prevRepIrrevIndex;
 }
 
 char Board::getPieceAt(int index) const {
@@ -1529,16 +1632,37 @@ void Board::updatePositionHistory(bool plus) {
 }
 
 bool Board::isThreefoldRepetition() {
-    const uint64_t hash = zobristHash;
-    auto it = positionHistory.find(hash);
-    int count = (it == positionHistory.end()) ? 0 : it->second;
-    return count >= 3;;
+    const uint64_t h = zobristHash;
+    int count = 0;
+
+    // scan only since last irreversible move; step by 2 to check same side-to-move positions
+    for (int i = repPly - 1; i >= repIrrevIndex; i -= 2) {
+        if (repStack[i] == h) {
+            if (++count >= 3) return true;
+        }
+    }
+    return false;
 }
 
 bool Board::isThreefoldRepetition(uint64_t hash) {
-    auto it = positionHistory.find(hash);
-    int count = (it == positionHistory.end()) ? 0 : it->second;
-    return count >= 2; 
+    int count = 0;
+
+    // scan only since last irreversible move; step by 2 to check same side-to-move positions
+    for (int i = repPly - 1; i >= repIrrevIndex; i -= 2) {
+        if (repStack[i] == hash) {
+            if (++count >= 3) return true;
+        }
+    }
+    return false; 
+}
+
+bool isTacticalPosition(const std::vector<Move>& moves, const Board& board) {
+    for (const Move& move : moves) {
+        if (isGoodCapture(move, board) || isEqualCapture(move, board) || move.promotion) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int getPieceValue(char piece) {
@@ -1608,93 +1732,6 @@ bool isEqualCapture(const Move& move, const Board& board) {
 bool isKillerMove(const Move& move, const Board& board, int depth) {
     return (move == board.killerMoves[0][depth] || move == board.killerMoves[1][depth]);
  }
-
-std::vector<std::pair<Move, uint64_t>> orderMoves(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth) {
-    Move hashMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
-
-    std::vector<std::pair<Move, uint64_t>> allMoves;
-    allMoves.reserve(moves.size());
-
-    for (const Move& move : moves) {
-        uint64_t score = 0;
-        int captureStrength;
-        if (move == hashMove) {
-            allMoves.push_back({ move, board.maxHistoryValue + 100 });
-        }
-        else if (move.isCapture || move.promotion) {
-            captureStrength = isGoodCapture(move, board);
-            score += captureStrength;
-            if (captureStrength < 0) {
-                allMoves.push_back({ move,  score });
-                continue;
-            }
-            else if (move.promotion) {
-                score += getPieceValue(move.promotion);
-            }
-            allMoves.push_back({ move,  score + board.maxHistoryValue + 1 });
-        }
-        else if (isKillerMove(move, board, depth)) {
-            allMoves.push_back({ move, board.maxHistoryValue });
-        }
-        else {
-            score = board.historyHeuristic[board.posToValue(move.from)][move.to]; // This should be between 0-maxHistoryValue
-            allMoves.push_back({ move, score });
-        }
-    }
-
-    // Sort non-captures based on history heuristic  
-    std::sort(allMoves.begin(), allMoves.end(), [](const std::pair<Move, uint64_t>& a, const std::pair<Move, uint64_t>& b) {
-        return a.second > b.second;
-        });
-    return allMoves;
-}
-
-std::vector<Move> orderMoves2(Board& board, const std::vector<Move>& moves, TT_Entry* ttEntry, int depth) {
-    Move hashMove = (ttEntry && ttEntry->depth >= (depth >> 1)) ? ttEntry->move : NO_MOVE;
-
-    std::vector<std::pair<Move, uint64_t>> allMoves;
-    allMoves.reserve(moves.size());
-
-    for (const Move& move : moves) {
-        uint64_t score = 0;
-        int captureStrength;
-        if (move == hashMove) {
-            allMoves.push_back({ move, board.maxHistoryValue + 100 });
-        }
-        else if (move.isCapture || move.promotion) {
-            captureStrength = isGoodCapture(move, board);
-            score += captureStrength;
-            if (captureStrength < 0) {
-                allMoves.push_back({ move,  score});
-                continue;
-            }
-            else if (move.promotion) {
-                score += getPieceValue(move.promotion);
-            }
-            allMoves.push_back({ move,  score + board.maxHistoryValue + 1 });
-        }
-        else if (isKillerMove(move, board, depth)) {
-            allMoves.push_back({ move, board.maxHistoryValue });
-        }
-        else {
-            score = board.historyHeuristic[board.posToValue(move.from)][move.to]; // This should be between 0-maxHistoryValue
-            allMoves.push_back({ move, score });
-        }
-    }
-
-    // Sort non-captures based on history heuristic  
-    std::sort(allMoves.begin(), allMoves.end(), [](const std::pair<Move, uint64_t>& a, const std::pair<Move, uint64_t>& b) {
-        return a.second > b.second;
-        });
-
-
-    // Combine all move categories into the final ordered list
-    std::vector<Move> orderedMoves;
-    orderedMoves.reserve(moves.size());
-    for (const auto& pair : allMoves) orderedMoves.push_back(pair.first);
-
-    return orderedMoves;
-}
 
 void Board::resize_tt(uint64_t mb) {
     size_t entries = (mb * 1048576ull) / sizeof(TT_Entry);

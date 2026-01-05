@@ -42,6 +42,118 @@ struct EngineConfig {
     int maxGamePlies = 512;
 };
 
+struct EngineMovePicker {
+    struct SM { Move m; int score; };
+
+    Board& board;
+    const Move hashMove;
+    const bool hasHash;
+    const Move killer1;
+    const Move killer2;
+    const bool useHistory;
+    const uint64_t (*history)[64];
+
+    bool hashDone = false;
+
+    Move killers[2];
+    int killerCount = 0;
+    int killerIdx = 0;
+
+    SM goodCaps[256]; int goodN = 0; int goodIdx = 0;
+    SM badCaps[256];  int badN  = 0; int badIdx  = 0;
+    SM quiets[256];   int quietN= 0; int quietIdx= 0;
+
+    EngineMovePicker(Board& b,
+                     const MoveList& moves,
+                     const Move& hm,
+                     const Move& k1,
+                     const Move& k2,
+                     bool useHist,
+                     const uint64_t (*hist)[64])
+        : board(b),
+          hashMove(hm),
+          hasHash(!(hm == Move(-1,-1)) && !(hm == NO_MOVE)),
+          killer1(k1),
+          killer2(k2),
+          useHistory(useHist),
+          history(hist)
+    {
+        // Collect killers (avoid dup and avoid hash move)
+        if (!(killer1 == NO_MOVE) && killer1.from != -1 && (!hasHash || !(killer1 == hashMove))) {
+            killers[killerCount++] = killer1;
+        }
+        if (!(killer2 == NO_MOVE) && killer2.from != -1 &&
+            (!(killer2 == killer1)) && (!hasHash || !(killer2 == hashMove))) {
+            killers[killerCount++] = killer2;
+        }
+
+        // Bucket moves once (no sort)
+        for (int i = 0; i < moves.size; ++i) {
+            const Move& mv = moves.m[i];
+            if (hasHash && mv == hashMove) continue;
+
+            if (mv.isCapture || mv.promotion) {
+                int s = isGoodCapture(mv, board);
+                if (mv.promotion) s += getPieceValue(mv.promotion) + 1000;
+
+                if (s >= 0 || mv.promotion) goodCaps[goodN++] = { mv, s };
+                else                        badCaps[badN++]  = { mv, s };
+            } else if (mv == killer1 || mv == killer2) {
+                // already queued in killers[]
+                continue;
+            } else {
+                int s = 0;
+                if (useHistory) {
+                    int idx = board.posToValue(mv.from);
+                    if (idx >= 0 && idx < 12) s = (int)history[idx][mv.to];
+                }
+                quiets[quietN++] = { mv, s };
+            }
+        }
+    }
+
+    static inline bool pickBest(SM* arr, int n, int& idx, Move& out) {
+        if (idx >= n) return false;
+        int best = idx;
+        int bestScore = arr[idx].score;
+        for (int i = idx + 1; i < n; ++i) {
+            if (arr[i].score > bestScore) {
+                bestScore = arr[i].score;
+                best = i;
+            }
+        }
+        if (best != idx) std::swap(arr[best], arr[idx]);
+        out = arr[idx].m;
+        ++idx;
+        return true;
+    }
+
+    bool next(Move& out) {
+        // stage 0: hash move
+        if (!hashDone) {
+            hashDone = true;
+            if (hasHash) { out = hashMove; return true; }
+        }
+
+        // stage 1: good captures/promos
+        if (pickBest(goodCaps, goodN, goodIdx, out)) return true;
+
+        // stage 2: killers
+        if (killerIdx < killerCount) {
+            out = killers[killerIdx++];
+            return true;
+        }
+
+        // stage 3: quiets by history
+        if (pickBest(quiets, quietN, quietIdx, out)) return true;
+
+        // stage 4: bad captures last
+        if (pickBest(badCaps, badN, badIdx, out)) return true;
+
+        return false;
+    }
+};
+
 class Engine {
 public:
     explicit Engine(const EngineConfig& cfg = EngineConfig());
