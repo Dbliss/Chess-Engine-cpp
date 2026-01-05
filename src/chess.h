@@ -172,8 +172,6 @@ public:
     bool amIInCheck(bool player);
     void makeMove(Move& move, Undo& u);
     void undoMove(const Move& move, const Undo& u);
-    void makeMoveFast(Move& move, Undo& u);
-    void undoMoveFast(const Move& move, const Undo& u);
     char getPieceAt(int index) const;
     Bitboard computePinnedMask(bool forWhite) const;
     void rebuildMailbox(); 

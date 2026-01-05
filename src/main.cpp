@@ -157,7 +157,6 @@ void playAgainstComputer() {
     sf::Text ponderingText(font, ponderingOn ? "Yes" : "No", 20);
     ponderingText.setPosition({static_cast<float>(display.tileSize * 8 + 10), 270});
 
-    // ---- NEW: Engine instance (replaces engine2.cpp functions) ----
     EngineConfig cfg;
     cfg.timeLimitMs = timeLimit;
     Engine engine(cfg);

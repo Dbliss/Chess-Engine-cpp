@@ -1980,8 +1980,10 @@ void Board::clear_tt() {
 }
 
 TT_Entry* Board::probeTranspositionTable(uint64_t hash) {
+    if (transposition_table.empty()) return nullptr;
     return &transposition_table[hash & (transposition_table.size() - 1)];
 }
+
 
 // Checking if it is a quiet position or not
 bool isNullViable(Board& board) {

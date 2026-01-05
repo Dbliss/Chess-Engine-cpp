@@ -1,0 +1,18 @@
+PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
+PLY 0  after getMove  from=8  to=16  promo=0
+PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
+PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
+PLY 0  after getMove  from=8  to=16  promo=0
+PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
+PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
+PLY 0  after getMove  from=8  to=16  promo=0
+PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
+PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
+PLY 0  after getMove  from=8  to=16  promo=0
+PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
+PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
+PLY 0  after getMove  from=8  to=16  promo=0
+PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
+PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
+PLY 0  after getMove  from=8  to=16  promo=0
+PLY 1  before getMove  whiteToMove=0  hash=457553342737119226

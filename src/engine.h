@@ -5,24 +5,29 @@
 #include <cstdint>
 #include <vector>
 #include <chrono>
+#include <utility>
 
 // Keep this symbol available because your existing main.cpp calls it.
 bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights, int numBlackBishops);
 
 struct EngineConfig {
     // time control
-    int timeLimitMs = 300;          // per-move
+    int drawPenalty = 10;
+    int timeLimitMs = 50;          // per-move
 
-    // structural switches (your “tuning knobs”)
-    bool useOpeningBook = true;     // uses Board's loaded HASH_BOOK entries (transposition_table.dat)
-    bool useTT = true;              // engine-owned TT (separate per engine instance)
-    bool useNullMove = true;
-    bool useLMR = true;
-    bool useKillerMoves = true;
-    bool useHistoryHeuristic = true;
+    bool useOpeningBook = false;
+    bool useMovePicker = false;      // NEW: use EngineMovePicker instead of sorting
 
-    bool quiescenceIncludeChecks = false; // captures+promotions only vs +checks
-    bool extendChecks = false;            // +1 ply extension if move gives check (capped)
+    // NEW: strength toggles (A/B testable)
+    bool usePVS = true;             // Principal Variation Search
+    bool useAspiration = false;      // aspiration window at root
+    bool useNullMovePruning = false; // separate from "useNullMove" so you can A/B easily
+
+    // NEW: speed toggles
+    bool useTimeCheckMask = false;   // check time every N nodes, not every node
+    uint32_t timeCheckMask = 2047;  // check at (nodes & mask)==0 => ~every 2048 nodes
+
+    bool extendChecks = false;      // your existing +1 extension for giving check (capped)
 
     // tuning safeguards
     int maxExtensionsPerLine = 3;
@@ -30,6 +35,13 @@ struct EngineConfig {
 
     // TT sizing
     uint64_t ttSizeMB = 64;
+
+    // aspiration parameters
+    int aspirationStartWindow = 35; // centipawns
+    int aspirationGrowFactor = 2;   // window *= factor on fail-high/low
+
+    // null move parameters
+    int nullMoveReductionBase = 2;  // R = base + depth/3
 
     // (optional) eval tuning values
     int pawnValue   = 100;
@@ -51,7 +63,7 @@ struct EngineMovePicker {
     const Move killer1;
     const Move killer2;
     const bool useHistory;
-    const uint64_t (*history)[64];
+    const int32_t (*history)[64];
 
     bool hashDone = false;
 
@@ -63,13 +75,7 @@ struct EngineMovePicker {
     SM badCaps[256];  int badN  = 0; int badIdx  = 0;
     SM quiets[256];   int quietN= 0; int quietIdx= 0;
 
-    EngineMovePicker(Board& b,
-                     const MoveList& moves,
-                     const Move& hm,
-                     const Move& k1,
-                     const Move& k2,
-                     bool useHist,
-                     const uint64_t (*hist)[64])
+    EngineMovePicker(Board& b, const MoveList& moves, const Move& hm, const Move& k1, const Move& k2, bool useHist, const int32_t (*hist)[64])
         : board(b),
           hashMove(hm),
           hasHash(!(hm == Move(-1,-1)) && !(hm == NO_MOVE)),
@@ -78,7 +84,6 @@ struct EngineMovePicker {
           useHistory(useHist),
           history(hist)
     {
-        // Collect killers (avoid dup and avoid hash move)
         if (!(killer1 == NO_MOVE) && killer1.from != -1 && (!hasHash || !(killer1 == hashMove))) {
             killers[killerCount++] = killer1;
         }
@@ -87,7 +92,6 @@ struct EngineMovePicker {
             killers[killerCount++] = killer2;
         }
 
-        // Bucket moves once (no sort)
         for (int i = 0; i < moves.size; ++i) {
             const Move& mv = moves.m[i];
             if (hasHash && mv == hashMove) continue;
@@ -99,7 +103,6 @@ struct EngineMovePicker {
                 if (s >= 0 || mv.promotion) goodCaps[goodN++] = { mv, s };
                 else                        badCaps[badN++]  = { mv, s };
             } else if (mv == killer1 || mv == killer2) {
-                // already queued in killers[]
                 continue;
             } else {
                 int s = 0;
@@ -117,10 +120,7 @@ struct EngineMovePicker {
         int best = idx;
         int bestScore = arr[idx].score;
         for (int i = idx + 1; i < n; ++i) {
-            if (arr[i].score > bestScore) {
-                bestScore = arr[i].score;
-                best = i;
-            }
+            if (arr[i].score > bestScore) { bestScore = arr[i].score; best = i; }
         }
         if (best != idx) std::swap(arr[best], arr[idx]);
         out = arr[idx].m;
@@ -129,27 +129,14 @@ struct EngineMovePicker {
     }
 
     bool next(Move& out) {
-        // stage 0: hash move
         if (!hashDone) {
             hashDone = true;
             if (hasHash) { out = hashMove; return true; }
         }
-
-        // stage 1: good captures/promos
         if (pickBest(goodCaps, goodN, goodIdx, out)) return true;
-
-        // stage 2: killers
-        if (killerIdx < killerCount) {
-            out = killers[killerIdx++];
-            return true;
-        }
-
-        // stage 3: quiets by history
+        if (killerIdx < killerCount) { out = killers[killerIdx++]; return true; }
         if (pickBest(quiets, quietN, quietIdx, out)) return true;
-
-        // stage 4: bad captures last
         if (pickBest(badCaps, badN, badIdx, out)) return true;
-
         return false;
     }
 };
@@ -179,16 +166,8 @@ private:
     int evaluate(Board& board) const;
 
     int quiescence(Board& board, int alpha, int beta, int ply, bool& timedOut);
-    int search(Board& board,
-               int depth,
-               int alpha,
-               int beta,
-               int startDepth,
-               int ply,
-               int totalExtensions,
-               bool lastIterationNull,
-               Move& bestMoveOut,
-               bool& timedOut);
+    int search(Board& board, int depth, int alpha, int beta, int startDepth, int ply, int totalExtensions, bool lastIterationNull, Move& bestMoveOut, bool& timedOut);
+
 
     // --- ordering & heuristics (engine-owned, not Board-owned) ---
     void orderMoves(Board& board, MoveList& moves, const Move& hashMove, int depth);
@@ -220,6 +199,7 @@ private:
     int lastNodes_ = 0;
     int lastDepth_ = 0;
     int lastEval_  = 0;
+    bool rootSideIsWhite_ = true;
 
     // heuristics
     static constexpr int MAX_PLY = 128;

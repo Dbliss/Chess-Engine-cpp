@@ -20,6 +20,12 @@
 #include <bit>
 
 // ---------------------------- helpers
+static void logLine(const std::string& s) {
+    std::ofstream out("match_log.txt", std::ios::app);
+    out << s << "\n";
+    out.flush();
+}
+
 static std::string trim(const std::string& s) {
     size_t a = 0;
     while (a < s.size() && std::isspace((unsigned char)s[a])) ++a;
@@ -75,7 +81,7 @@ static std::vector<std::string> loadFens(const std::string& path, int& outPositi
 
 bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights, int numBlackBishops);
 
-static bool isDrawByMaterial(Board board) {
+static bool isDrawByMaterial(const Board& board) {
     int numWhitePawns   = std::popcount(board.whitePawns);
     int numWhiteBishops = std::popcount(board.whiteBishops);
     int numWhiteKnights = std::popcount(board.whiteKnights);
@@ -375,7 +381,7 @@ static GameResult playOne(Board& board,
     // local repetition tracking (threefold)
     std::unordered_map<uint64_t, int> rep;
     rep.reserve(2048);
-    rep[board.generateZobristHash()] = 1;
+    rep[board.zobristHash] = 1;
 
     if (display && window) {
         display->setupPieces(board);
@@ -492,14 +498,18 @@ static GameResult playOne(Board& board,
             return GameResult::Draw;
         }
 
+        auto containsMove = [&](const MoveList& ml, const Move& m) {
+            for (int i = 0; i < ml.size; ++i) if (ml.m[i] == m) return true;
+            return false;
+        };
+
         Engine& side = board.whiteToMove ? whiteEngine : blackEngine;
         Move m = side.getMove(board);
-
         Undo u;
         board.makeMove(m, u);
 
         // repetition
-        uint64_t h = board.generateZobristHash();
+        uint64_t h = board.zobristHash;
         int c = (++rep[h]);
         if (c >= 3) {
             if (display && window && ui) {
@@ -549,19 +559,8 @@ int main() {
     // ---------------- Configure engines ----------------
     // Assumption: everything ON for both to start.
     EngineConfig cfgA;
-    cfgA.timeLimitMs = 120;
-    cfgA.useOpeningBook = true;
-    cfgA.useTT = true;
-    cfgA.useNullMove = true;
-    cfgA.useLMR = true;
-    cfgA.useKillerMoves = true;
-    cfgA.useHistoryHeuristic = true;
-    cfgA.quiescenceIncludeChecks = false;
-    cfgA.extendChecks = true;
-    cfgA.ttSizeMB = 64;
-    cfgA.maxGamePlies = 512;
-
     EngineConfig cfgB = cfgA;
+    cfgB.useAspiration = true;
 
     // Example difference knobs (edit however you want)
     //cfgB.quiescenceIncludeChecks = true;
@@ -591,7 +590,6 @@ int main() {
     ui.panelW = panelW;
     ui.init(boardPx, fontPtr);
 
-    // THINK TIME (ms)
     std::atomic<int> thinkMs{ cfgA.timeLimitMs };
     std::atomic<bool> paused{ false };
     std::atomic<bool> stopRequested{ false };
@@ -612,6 +610,7 @@ int main() {
 
         // Game 1: A(W) vs B(B)
         board.createBoardFromFEN(fenStr);
+        board.zobristHash = board.generateZobristHash();
         {
             gameCounter++;
             std::string matchup = "Matchup: A(W) vs B(B)";
@@ -637,6 +636,7 @@ int main() {
 
         // Game 2: B(W) vs A(B)
         board.createBoardFromFEN(fenStr);
+        board.zobristHash = board.generateZobristHash();
         {
             gameCounter++;
             std::string matchup = "Matchup: B(W) vs A(B)";

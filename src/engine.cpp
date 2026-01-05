@@ -65,12 +65,12 @@ void Engine::resizeTT(uint64_t mb) {
 }
 
 Engine::EngineTTEntry* Engine::probeTT(uint64_t key) {
-    if (!cfg_.useTT || tt_.empty()) return nullptr;
+    if (tt_.empty()) return nullptr;
     return &tt_[key & ttMask_];
 }
 
 void Engine::storeTT(uint64_t key, int score, TTFlag flag, const Move& move, int depth) {
-    if (!cfg_.useTT || tt_.empty()) return;
+    if (tt_.empty()) return;
     EngineTTEntry& e = tt_[key & ttMask_];
 
     // replace if different key, deeper, or exact info
@@ -85,9 +85,7 @@ void Engine::storeTT(uint64_t key, int score, TTFlag flag, const Move& move, int
 
 void Engine::newGame() {
     // clear TT
-    if (cfg_.useTT) {
-        for (auto& e : tt_) e = EngineTTEntry{};
-    }
+    for (auto& e : tt_) e = EngineTTEntry{};
 
     // clear heuristics
     for (int i = 0; i < 2; ++i) {
@@ -107,13 +105,11 @@ bool Engine::outOfTime() const {
 }
 
 bool Engine::isKiller(const Move& m, int depth) const {
-    if (!cfg_.useKillerMoves) return false;
     if (depth < 0 || depth >= MAX_PLY) return false;
     return (m == killers_[0][depth]) || (m == killers_[1][depth]);
 }
 
 void Engine::recordKiller(const Move& m, int depth) {
-    if (!cfg_.useKillerMoves) return;
     if (depth < 0 || depth >= MAX_PLY) return;
     if (m.isCapture) return;
 
@@ -124,7 +120,6 @@ void Engine::recordKiller(const Move& m, int depth) {
 }
 
 void Engine::updateHistory(Board& board, int from, int to, int bonus) {
-    if (!cfg_.useHistoryHeuristic) return;
     if (to < 0 || to >= 64) return;
 
     int idx = board.posToValue(from);
@@ -133,7 +128,7 @@ void Engine::updateHistory(Board& board, int from, int to, int bonus) {
     int64_t v = (int64_t)history_[idx][to] + (int64_t)bonus;
     if (v < 0) v = 0;
     if (v > maxHistoryValue_) v = maxHistoryValue_;
-    history_[idx][to] = (uint64_t)v;
+    history_[idx][to] = (int32_t)v;
 
 
     // updateHistory scaling behavior
@@ -174,7 +169,7 @@ void Engine::orderMoves(Board& board, MoveList& moves, const Move& hashMove, int
         else if (isKiller(m, depth)) {
             score = (int)maxHistoryValue_;
         }
-        else if (cfg_.useHistoryHeuristic) {
+        else {
             int idx = board.posToValue(m.from);
             if (idx >= 0 && idx < 12) score = (int)history_[idx][m.to];
         }
@@ -555,116 +550,102 @@ int Engine::evaluate(Board& board) const {
 }
 
 int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOut) {
-    if (outOfTime()) { timedOut = true; return 0; }
+    // node accounting first so time masking works consistently
     lastNodes_++;
 
-    if (ply > 0 && board.isThreefoldRepetition()) {
-        return 0;
+    if (cfg_.useTimeCheckMask) {
+        if (((uint32_t)lastNodes_ & cfg_.timeCheckMask) == 0u) {
+            if (outOfTime()) { timedOut = true; return 0; }
+        }
+    } else {
+        if (outOfTime()) { timedOut = true; return 0; }
     }
 
-    if (ply >= 64) {
-        return evaluate(board);
+    if (ply >= 64) return evaluate(board);
+
+    const bool inCheck = board.amIInCheck(board.whiteToMove);
+
+    MoveList legal;
+    board.generateAllMoves(legal);
+
+    if (legal.size == 0) {
+        return inCheck ? -(MATE_SCORE - ply) : ((board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty);
     }
 
-    const bool sideToMoveInCheck = board.amIInCheck(board.whiteToMove);
-    MoveList legalMoves;
-    board.generateAllMoves(legalMoves);
-
-    if (legalMoves.size == 0) {
-        // If in check -> checkmate. If not -> stalemate draw.
-        return sideToMoveInCheck ? -(MATE_SCORE - ply) : 0;
+    if (!inCheck) {
+        const int standPat = evaluate(board);
+        if (standPat >= beta) return standPat;
+        if (standPat > alpha) alpha = standPat;
     }
 
-    if (!sideToMoveInCheck) {
-        const int staticEval = evaluate(board);
-        // Beta cutoff: if static eval is already too good, opponent will avoid this line anyway.
-        if (staticEval >= beta) return staticEval;
-        // Improve alpha with static eval (best we can do without forcing tactics).
-        if (staticEval > alpha) alpha = staticEval;
+    // Build candidate list (fixed arrays, no heap)
+    struct SM { Move m; int score; };
+    SM cand[256];
+    int n = 0;
+
+    for (int i = 0; i < legal.size; ++i) {
+        const Move& mv = legal.m[i];
+
+        if (!inCheck) {
+            // quiescence: captures/promotions only (checks removed entirely)
+            if (!mv.isCapture && !mv.promotion) continue;
+        }
+
+        int s = 0;
+        if (mv.promotion) s += getPieceValue(mv.promotion) + 1000;
+        if (mv.isCapture) s += isGoodCapture(mv, board);
+        cand[n++] = { mv, s };
     }
 
-    // Build the list of moves we will actually search in quiescence:
-    // - If in check: must consider ALL legal moves (evasions can be quiet king moves / blocks).
-    // - If not in check: only consider tactical moves (captures/promotions, optionally checks).
-    std::vector<std::pair<Move, int>> candidateMoves;
-    candidateMoves.reserve(legalMoves.size);
+    if (n == 0) return alpha;
 
-    for (const Move& moveRef : legalMoves) {
-        bool shouldSearchThisMove = sideToMoveInCheck; // if in check, search everything
-
-        int moveScoreForOrdering = 0;
-
-        if (!sideToMoveInCheck) {
-            shouldSearchThisMove = (moveRef.isCapture || moveRef.promotion);
-
-            // Optional: also include checking moves (even if quiet)
-            if (!shouldSearchThisMove && cfg_.quiescenceIncludeChecks) {
-                Move move = moveRef;
-                Undo u;
-                board.makeMove(move, u);
-
-                const bool givesCheck = board.amIInCheck(board.whiteToMove);
-
-                board.undoMove(move, u);
-
-                if (givesCheck) {
-                    shouldSearchThisMove = true;
-                    moveScoreForOrdering += 50; // small ordering bonus for checks
-                }
+    // selection-pick best each time (like your move picker)
+    for (int picked = 0; picked < n; ++picked) {
+        int best = picked;
+        int bestScore = cand[picked].score;
+        for (int j = picked + 1; j < n; ++j) {
+            if (cand[j].score > bestScore) {
+                bestScore = cand[j].score;
+                best = j;
             }
         }
+        if (best != picked) std::swap(cand[best], cand[picked]);
 
-        if (!shouldSearchThisMove) continue;
-
-        if (moveRef.promotion) {
-            moveScoreForOrdering += getPieceValue(moveRef.promotion);
-        }
-        if (moveRef.isCapture) {
-            moveScoreForOrdering += isGoodCapture(moveRef, board);
-        }
-
-        candidateMoves.push_back({ moveRef, moveScoreForOrdering });
-    }
-
-
-    if (candidateMoves.empty()) {
-        return alpha;
-    }
-
-    std::sort(candidateMoves.begin(), candidateMoves.end(),
-        [](const auto& a, const auto& b) { return a.second > b.second; });
-
-    for (auto& ms : candidateMoves) {
-        Move move = ms.first;
-
+        Move mv = cand[picked].m;
         Undo u;
-        board.makeMove(move, u);
+        board.makeMove(mv, u);
 
-        const int scoreFromChild = -quiescence(board, -beta, -alpha, ply + 1, timedOut);
-
-        board.undoMove(move, u);
+        const int score = -quiescence(board, -beta, -alpha, ply + 1, timedOut);
+        board.undoMove(mv, u);
 
         if (timedOut) return 0;
 
-        if (scoreFromChild >= beta) return scoreFromChild;
-        if (scoreFromChild > alpha) alpha = scoreFromChild;
+        if (score >= beta) return score;
+        if (score > alpha) alpha = score;
     }
 
     return alpha;
 }
 
-int Engine::search(Board& board, int depth, int alpha, int beta, int startDepth, int ply, int totalExtensions, bool lastIterationNull, Move& bestMoveOut, bool& timedOut) {
-    if (outOfTime()) { timedOut = true; return 0; }
+int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int ply,int totalExtensions,bool lastIterationNull,Move& bestMoveOut,bool& timedOut){
+    lastNodes_++;
+
+    if (cfg_.useTimeCheckMask) {
+        if (((uint32_t)lastNodes_ & cfg_.timeCheckMask) == 0u) {
+            if (outOfTime()) { timedOut = true; bestMoveOut = NO_MOVE; return 0; }
+        }
+    } else {
+        if (outOfTime()) { timedOut = true; bestMoveOut = NO_MOVE; return 0; }
+    }
 
     if (depth <= 0) {
         bestMoveOut = NO_MOVE;
         return quiescence(board, alpha, beta, ply, timedOut);
     }
 
-    // Treat repetition as a draw during search
     if (ply > 0 && !lastIterationNull && board.isThreefoldRepetition()) {
         bestMoveOut = NO_MOVE;
-        return 0;
+        return (board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty;
     }
 
     const int originalAlpha = alpha;
@@ -673,7 +654,7 @@ int Engine::search(Board& board, int depth, int alpha, int beta, int startDepth,
 
     const uint64_t key = board.zobristHash;
 
-    // Opening book from Board's loaded book entries
+    // Opening book (root only)
     if (cfg_.useOpeningBook && depth == startDepth) {
         TT_Entry* book = board.probeTranspositionTable(key);
         if (book && book->key == key && book->flag == HASH_BOOK) {
@@ -682,13 +663,13 @@ int Engine::search(Board& board, int depth, int alpha, int beta, int startDepth,
         }
     }
 
-    // TT probe (engine-owned)
+    // TT probe
     EngineTTEntry* tt = probeTT(key);
     Move hashMove = NO_MOVE;
 
     if (tt && tt->key == key) {
         hashMove = tt->move;
-        int ttScore = scoreFromTT(tt->score, ply);
+        const int ttScore = scoreFromTT(tt->score, ply);
 
         if (tt->depth >= depth) {
             if (tt->flag == HASH_FLAG_EXACT) {
@@ -703,85 +684,160 @@ int Engine::search(Board& board, int depth, int alpha, int beta, int startDepth,
             }
         }
     }
-    MoveList moves;
-    board.generateAllMoves(moves);
-    if (moves.size == 0) {
-        bestMoveOut = NO_MOVE;
-        if (board.amIInCheck(board.whiteToMove)) {
-            return -(MATE_SCORE - ply); // mated sooner is more negative
+
+    const bool inCheck = board.amIInCheck(board.whiteToMove);
+
+    // Null-move pruning (A/B with useNullMovePruning)
+    if (cfg_.useNullMovePruning &&
+        !inCheck &&
+        !lastIterationNull &&
+        depth >= 3 &&
+        std::abs(beta) < (MATE_THRESHOLD - 500) &&
+        isNullViable(board))
+    {
+        Undo nu;
+        board.makeNullMove(nu);
+
+        Move dummy = NO_MOVE;
+        const int R = cfg_.nullMoveReductionBase + (depth / 3);
+        const int nullDepth = depth - 1 - R;
+
+        int score = -search(board,
+                            nullDepth,
+                            -(beta),
+                            -(beta - 1),
+                            startDepth,
+                            ply + 1,
+                            totalExtensions,
+                            true,
+                            dummy,
+                            timedOut);
+
+        board.undoNullMove(nu);
+
+        if (timedOut) { bestMoveOut = NO_MOVE; return 0; }
+        if (score >= beta) {
+            // Fail-high => prune
+            bestMoveOut = NO_MOVE;
+            return beta;
         }
-        return 0;
     }
 
-    orderMoves(board, moves, hashMove, ply);
+    MoveList moves;
+    board.generateAllMoves(moves);
 
-    int extensionBase = 0;
-    std::vector<Move> quietTried;
-    quietTried.reserve(32);
+    if (moves.size == 0) {
+        bestMoveOut = NO_MOVE;
+        return inCheck ? -(MATE_SCORE - ply) : ((board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty);
+    }
+
+    // Prepare move ordering
+    if (!cfg_.useMovePicker) {
+        orderMoves(board, moves, hashMove, ply);
+    }
+
+    // Quiet tried list (fixed-size, no heap)
+    Move quietTried[64];
+    int quietTriedN = 0;
 
     int bestScore = -1000000;
 
-    for (int i = 0; i < moves.size; ++i) {
-        Move& move = moves.m[i];
+    // Move iteration
+    if (ply >= MAX_PLY) {
+        bestMoveOut = NO_MOVE;
+        return evaluate(board); // or quiescence(board, alpha, beta, ply, timedOut)
+    }
+
+    EngineMovePicker picker(board, moves, hashMove, killers_[0][ply], killers_[1][ply], true, history_);
+
+    Move mv;
+    int moveIndex = 0;
+
+    while (true) {
+        if (cfg_.useMovePicker) {
+            if (!picker.next(mv)) break;
+        } else {
+            if (moveIndex >= moves.size) break;
+            mv = moves.m[moveIndex];
+        }
 
         Undo u;
-        board.makeMove(move, u);
 
-        const bool quiet = (!move.isCapture && !move.promotion);
-        if (cfg_.useHistoryHeuristic && quiet) {
-            quietTried.push_back(move);
+        Move played = mv; 
+        board.makeMove(played, u);
+
+        const bool quiet = (!played.isCapture && !played.promotion);
+        if (quiet && quietTriedN < 64) {
+            quietTried[quietTriedN++] = played;
         }
 
-        int ext = extensionBase;
-
+        int ext = 0;
         if (cfg_.extendChecks && totalExtensions < cfg_.maxExtensionsPerLine) {
-            if (board.amIInCheck(board.whiteToMove)) ext += 1; // move gave check
+            if (board.amIInCheck(board.whiteToMove)) ext = 1;
         }
-
         ext = std::clamp(ext, 0, 2);
 
         int reduction = 0;
-        if (cfg_.useLMR && depth >= 4 && !move.isCapture && ext == 0 && i >= 3 && std::abs(alpha) < MATE_THRESHOLD - 500 && !board.amIInCheck(board.whiteToMove)) {
+        if (depth >= 4 &&
+            quiet &&
+            ext == 0 &&
+            moveIndex >= 3 &&
+            std::abs(alpha) < (MATE_THRESHOLD - 500) &&
+            !board.amIInCheck(board.whiteToMove))
+        {
             reduction = 1;
         }
 
-        Move childBest;
-        int child = search(board, depth - 1 - reduction + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
+        Move childBest = NO_MOVE;
 
-        int score = -child;
+        int score;
 
-        if (!timedOut && reduction == 1 && score > alpha) {
-            child = search(board, depth - 1 + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
+        // PVS: first move full-window, rest null-window then re-search if needed (A/B with usePVS)
+        if (cfg_.usePVS && moveIndex > 0) {
+            int child = search(board, depth - 1 - reduction + ext, -(alpha + 1), -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
             score = -child;
+
+            if (!timedOut && score > alpha && score < beta) { score = -search(board, depth - 1 - reduction + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut); }
+        } else {
+            score = -search(board, depth - 1 - reduction + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
         }
 
-        board.undoMove(move, u);
+        // LMR re-search (your existing behavior)
+        if (!timedOut && reduction == 1 && score > alpha) {
+            Move retryBest = NO_MOVE;
+            score = -search(board, depth - 1 + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, retryBest, timedOut);
+        }
 
-        if (timedOut) return 0;
+        board.undoMove(played, u);
+
+        if (timedOut) { bestMoveOut = NO_MOVE; return 0; }
 
         if (score > bestScore) {
             bestScore = score;
-            bestMoveOut = move;
+            bestMoveOut = mv;
         }
 
-        alpha = std::max(alpha, score);
+        if (score > alpha) alpha = score;
 
         if (alpha >= beta) {
             if (quiet) {
-                recordKiller(move, ply);
+                recordKiller(mv, ply);
 
-                int bonus = depth * depth;
-                int malus = bonus / 4;
+                const int bonus = depth * depth;
+                const int malus = bonus / 4;
 
-                updateHistory(board, move.from, move.to, bonus);
+                updateHistory(board, mv.from, mv.to, bonus);
 
-                for (const Move& q : quietTried) {
-                    if (q == move) continue;
+                for (int qi = 0; qi < quietTriedN; ++qi) {
+                    const Move& q = quietTried[qi];
+                    if (q == mv) continue;
                     updateHistory(board, q.from, q.to, -malus);
                 }
             }
             break;
         }
+
+        moveIndex++;
     }
 
     // TT store
@@ -807,7 +863,7 @@ int Engine::getTimeLimitMs() const {
 
 Move Engine::getMove(Board& board) {
     endTime_ = std::chrono::high_resolution_clock::now() + std::chrono::milliseconds(cfg_.timeLimitMs);
-
+    rootSideIsWhite_ = board.whiteToMove;
     lastNodes_ = 0;
     lastDepth_ = 0;
     lastEval_  = 0;
@@ -824,26 +880,72 @@ Move Engine::getMove(Board& board) {
         Move rootBest = NO_MOVE;
         timedOut = false;
 
-        int score = search(board, depth, -999999, 999999, depth, 0, 0, false, rootBest, timedOut);
+        int alpha = -999999;
+        int beta  =  999999;
 
-        if (timedOut) break;
+        if (cfg_.useAspiration && depth > 1) {
+            int window = cfg_.aspirationStartWindow;
+            alpha = prevScore - window;
+            beta  = prevScore + window;
 
-        // accept only valid move
-        if (rootBest.from != -1 && rootBest.to != -1) {
-            bestMove = rootBest;
-            bestScore = score;
-            lastDepth_ = depth;
-            lastEval_ = score;
+            while (true) {
+                rootBest = NO_MOVE;
+                int score = search(board, depth, alpha, beta, depth, 0, 0, false, rootBest, timedOut);
+                if (timedOut) break;
+
+                // fail-low => widen down
+                if (score <= alpha) {
+                    window *= cfg_.aspirationGrowFactor;
+                    alpha = prevScore - window;
+                    beta  = prevScore + window;
+                    continue;
+                }
+
+                // fail-high => widen up
+                if (score >= beta) {
+                    window *= cfg_.aspirationGrowFactor;
+                    alpha = prevScore - window;
+                    beta  = prevScore + window;
+                    continue;
+                }
+
+                // success
+                prevScore = score;
+                break;
+            }
+
+            if (timedOut) break;
+
+            // accept move
+            if (rootBest.from != -1 && rootBest.to != -1) {
+                bestMove = rootBest;
+                bestScore = prevScore;
+                lastDepth_ = depth;
+                lastEval_ = bestScore;
+            } else {
+                bestMove = prevBest;
+                bestScore = prevScore;
+            }
         } else {
-            // keep previous
-            bestMove = prevBest;
-            bestScore = prevScore;
+            int score = search(board, depth, alpha, beta, depth, 0, 0, false, rootBest, timedOut);
+            if (timedOut) break;
+
+            if (rootBest.from != -1 && rootBest.to != -1) {
+                bestMove = rootBest;
+                bestScore = score;
+                lastDepth_ = depth;
+                lastEval_ = bestScore;
+            } else {
+                bestMove = prevBest;
+                bestScore = prevScore;
+            }
+
+            prevScore = bestScore;
         }
 
         prevBest = bestMove;
-        prevScore = bestScore;
 
-        if (std::abs(bestScore) >= MATE_THRESHOLD) break; // mate found
+        if (std::abs(bestScore) >= MATE_THRESHOLD) break;
         if (outOfTime()) break;
     }
 
