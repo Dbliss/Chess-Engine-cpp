@@ -15,7 +15,7 @@ struct EngineConfig {
     int drawPenalty = 30;
     int timeLimitMs = 100; // per-move
 
-    bool useOpeningBook = true;
+    bool useOpeningBook = false;
 
     // strength toggles (A/B testable)
     uint32_t timeCheckMask = 2047;  // check at (nodes & mask)==0 => ~every 2048 nodes

@@ -922,6 +922,7 @@ Move Engine::getMove(Board& board) {
                 Move bookMove;
                 if (book.probe(board.zobristHash, bookMove)) {
                     std::cout << "Used opening book" << std::endl;
+                    std::cout << bookMove.from << bookMove.to << std::endl;
                     return bookMove;
                 }
             }
