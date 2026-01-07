@@ -183,14 +183,6 @@ public:
     int getEnPassantFile() const;
     uint64_t generateZobristHash() const;
 
-    std::vector<TT_Entry> transposition_table;
-    void resize_tt(uint64_t mb);
-    void clear_tt();
-    void record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move, int depth);
-    void configureTranspositionTableSize(uint64_t sizeInMB);
-    short probe_tt_entry(uint64_t hash_key, int alpha, int beta, int depth, TT_Entry& return_entry);
-    TT_Entry* probeTranspositionTable(uint64_t hash);
-    size_t countTranspositionTableEntries() const;
     void makeNullMove(Undo& u);
     void undoNullMove(const Undo& u);
     int posToValue(int from);

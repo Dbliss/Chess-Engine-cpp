@@ -12,22 +12,13 @@ bool isEndgameDraw(int numWhiteBishops, int numWhiteKnights, int numBlackKnights
 
 struct EngineConfig {
     // time control
-    int drawPenalty = 10;
-    int timeLimitMs = 50;          // per-move
+    int drawPenalty = 30;
+    int timeLimitMs = 100; // per-move
 
-    bool useOpeningBook = false;
-    bool useMovePicker = false;      // NEW: use EngineMovePicker instead of sorting
+    bool useOpeningBook = true;
 
-    // NEW: strength toggles (A/B testable)
-    bool usePVS = true;             // Principal Variation Search
-    bool useAspiration = false;      // aspiration window at root
-    bool useNullMovePruning = false; // separate from "useNullMove" so you can A/B easily
-
-    // NEW: speed toggles
-    bool useTimeCheckMask = false;   // check time every N nodes, not every node
+    // strength toggles (A/B testable)
     uint32_t timeCheckMask = 2047;  // check at (nodes & mask)==0 => ~every 2048 nodes
-
-    bool extendChecks = false;      // your existing +1 extension for giving check (capped)
 
     // tuning safeguards
     int maxExtensionsPerLine = 3;
@@ -37,7 +28,7 @@ struct EngineConfig {
     uint64_t ttSizeMB = 64;
 
     // aspiration parameters
-    int aspirationStartWindow = 35; // centipawns
+    int aspirationStartWindow = 100; // centipawns
     int aspirationGrowFactor = 2;   // window *= factor on fail-high/low
 
     // null move parameters
@@ -58,8 +49,8 @@ struct EngineMovePicker {
     struct SM { Move m; int score; };
 
     Board& board;
-    const Move hashMove;
-    const bool hasHash;
+    Move hashMove;
+    bool hasHash;
     const Move killer1;
     const Move killer2;
     const bool useHistory;
@@ -77,42 +68,58 @@ struct EngineMovePicker {
 
     EngineMovePicker(Board& b, const MoveList& moves, const Move& hm, const Move& k1, const Move& k2, bool useHist, const int32_t (*hist)[64])
         : board(b),
-          hashMove(hm),
-          hasHash(!(hm == Move(-1,-1)) && !(hm == NO_MOVE)),
-          killer1(k1),
-          killer2(k2),
-          useHistory(useHist),
-          history(hist)
+        hashMove(hm),
+        hasHash(!(hm == NO_MOVE) && hm.from != -1),
+        killer1(k1),
+        killer2(k2),
+        useHistory(useHist),
+        history(hist)
     {
-        if (!(killer1 == NO_MOVE) && killer1.from != -1 && (!hasHash || !(killer1 == hashMove))) {
-            killers[killerCount++] = killer1;
-        }
-        if (!(killer2 == NO_MOVE) && killer2.from != -1 &&
-            (!(killer2 == killer1)) && (!hasHash || !(killer2 == hashMove))) {
-            killers[killerCount++] = killer2;
-        }
+        bool foundHash = false;
 
         for (int i = 0; i < moves.size; ++i) {
             const Move& mv = moves.m[i];
-            if (hasHash && mv == hashMove) continue;
 
+            // Hash move: only if it exists in this position, and use the generated mv (correct isCapture)
+            if (hasHash && mv == hashMove) {
+                hashMove = mv;
+                foundHash = true;
+                continue;
+            }
+
+            // Captures/promos first
             if (mv.isCapture || mv.promotion) {
                 int s = isGoodCapture(mv, board);
                 if (mv.promotion) s += getPieceValue(mv.promotion) + 1000;
 
                 if (s >= 0 || mv.promotion) goodCaps[goodN++] = { mv, s };
                 else                        badCaps[badN++]  = { mv, s };
-            } else if (mv == killer1 || mv == killer2) {
                 continue;
-            } else {
-                int s = 0;
-                if (useHistory) {
-                    int idx = board.posToValue(mv.from);
-                    if (idx >= 0 && idx < 12) s = (int)history[idx][mv.to];
-                }
-                quiets[quietN++] = { mv, s };
             }
+
+            // Killers: ONLY if present in generated moves, and store mv (correct flags)
+            if (mv == killer1 || mv == killer2) {
+                // avoid duplicates and avoid duplicating hash
+                if ((!hasHash || !(mv == hashMove)) &&
+                    (killerCount == 0 || !(mv == killers[0])) &&
+                    killerCount < 2)
+                {
+                    killers[killerCount++] = mv;
+                }
+                continue;
+            }
+
+            // Quiets
+            int s = 0;
+            if (useHistory) {
+                int idx = board.posToValue(mv.from);
+                if (idx >= 0 && idx < 12) s = (int)history[idx][mv.to];
+            }
+            quiets[quietN++] = { mv, s };
         }
+
+        // If TT move wasn't found among legal moves, don't try to play it.
+        hasHash = hasHash && foundHash;
     }
 
     static inline bool pickBest(SM* arr, int n, int& idx, Move& out) {
@@ -160,6 +167,9 @@ public:
     int lastSearchNodes() const { return lastNodes_; }
     int lastSearchDepth() const { return lastDepth_; }
     int lastEval() const { return lastEval_; }
+    size_t transpositionSize() const;
+    void printAfterMoveDebug(Engine& engine, Board& board);
+
 
 private:
     // --- evaluation & search ---
@@ -182,6 +192,7 @@ private:
         int depth = -1;
         TTFlag flag = HASH_FLAG_EXACT;
         Move move = Move(-1, -1);
+        uint16_t gen = 0;
     };
 
     void resizeTT(uint64_t mb);
@@ -190,7 +201,6 @@ private:
 
     // --- misc ---
     bool outOfTime() const;
-
 private:
     EngineConfig cfg_;
 

@@ -1,5 +1,6 @@
 // ========================= engine.cpp =========================
 #include "engine.h"
+#include "opening_book.h"
 
 #include <algorithm>
 #include <cmath>
@@ -553,13 +554,14 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
     // node accounting first so time masking works consistently
     lastNodes_++;
 
-    if (cfg_.useTimeCheckMask) {
-        if (((uint32_t)lastNodes_ & cfg_.timeCheckMask) == 0u) {
-            if (outOfTime()) { timedOut = true; return 0; }
-        }
-    } else {
+    if (((uint32_t)lastNodes_ & cfg_.timeCheckMask) == 0u) {
         if (outOfTime()) { timedOut = true; return 0; }
     }
+
+    // Mate distance pruning window clamp (fail-soft friendly)
+    alpha = std::max(alpha, -MATE_SCORE + ply);
+    beta  = std::min(beta,   MATE_SCORE - ply);
+    if (alpha >= beta) return alpha;
 
     if (ply >= 64) return evaluate(board);
 
@@ -569,7 +571,9 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
     board.generateAllMoves(legal);
 
     if (legal.size == 0) {
-        return inCheck ? -(MATE_SCORE - ply) : ((board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty);
+        return inCheck
+            ? -(MATE_SCORE - ply)
+            : ((board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty);
     }
 
     if (!inCheck) {
@@ -587,7 +591,7 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
         const Move& mv = legal.m[i];
 
         if (!inCheck) {
-            // quiescence: captures/promotions only (checks removed entirely)
+            // quiescence: captures/promotions only
             if (!mv.isCapture && !mv.promotion) continue;
         }
 
@@ -599,7 +603,7 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
 
     if (n == 0) return alpha;
 
-    // selection-pick best each time (like your move picker)
+    // selection-pick best each time
     for (int picked = 0; picked < n; ++picked) {
         int best = picked;
         int bestScore = cand[picked].score;
@@ -620,23 +624,24 @@ int Engine::quiescence(Board& board, int alpha, int beta, int ply, bool& timedOu
 
         if (timedOut) return 0;
 
-        if (score >= beta) return score;
+        if (score >= beta) return score;   // fail-soft cutoff
         if (score > alpha) alpha = score;
     }
 
     return alpha;
 }
 
-int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int ply,int totalExtensions,bool lastIterationNull,Move& bestMoveOut,bool& timedOut){
+int Engine::search(Board& board, int depth, int alpha, int beta, int startDepth, int ply, int totalExtensions, bool lastIterationNull, Move& bestMoveOut, bool& timedOut){
     lastNodes_++;
 
-    if (cfg_.useTimeCheckMask) {
-        if (((uint32_t)lastNodes_ & cfg_.timeCheckMask) == 0u) {
-            if (outOfTime()) { timedOut = true; bestMoveOut = NO_MOVE; return 0; }
-        }
-    } else {
+    if (((uint32_t)lastNodes_ & cfg_.timeCheckMask) == 0u) {
         if (outOfTime()) { timedOut = true; bestMoveOut = NO_MOVE; return 0; }
     }
+
+    // Mate distance pruning window clamp
+    alpha = std::max(alpha, -MATE_SCORE + ply);
+    beta  = std::min(beta,   MATE_SCORE - ply);
+    if (alpha >= beta) { bestMoveOut = NO_MOVE; return alpha; }
 
     if (depth <= 0) {
         bestMoveOut = NO_MOVE;
@@ -653,15 +658,6 @@ int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int 
     bestMoveOut = NO_MOVE;
 
     const uint64_t key = board.zobristHash;
-
-    // Opening book (root only)
-    if (cfg_.useOpeningBook && depth == startDepth) {
-        TT_Entry* book = board.probeTranspositionTable(key);
-        if (book && book->key == key && book->flag == HASH_BOOK) {
-            bestMoveOut = book->move;
-            return 0;
-        }
-    }
 
     // TT probe
     EngineTTEntry* tt = probeTT(key);
@@ -687,14 +683,8 @@ int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int 
 
     const bool inCheck = board.amIInCheck(board.whiteToMove);
 
-    // Null-move pruning (A/B with useNullMovePruning)
-    if (cfg_.useNullMovePruning &&
-        !inCheck &&
-        !lastIterationNull &&
-        depth >= 3 &&
-        std::abs(beta) < (MATE_THRESHOLD - 500) &&
-        isNullViable(board))
-    {
+    // Null-move pruning
+    if (!inCheck && !lastIterationNull && depth >= 3 && std::abs(beta) < (MATE_THRESHOLD - 500) && isNullViable(board)){
         Undo nu;
         board.makeNullMove(nu);
 
@@ -716,10 +706,11 @@ int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int 
         board.undoNullMove(nu);
 
         if (timedOut) { bestMoveOut = NO_MOVE; return 0; }
+
         if (score >= beta) {
-            // Fail-high => prune
+            // FAIL-SOFT: return the real score so PVS can detect improvement correctly
             bestMoveOut = NO_MOVE;
-            return beta;
+            return score;
         }
     }
 
@@ -728,24 +719,20 @@ int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int 
 
     if (moves.size == 0) {
         bestMoveOut = NO_MOVE;
-        return inCheck ? -(MATE_SCORE - ply) : ((board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty);
+        return inCheck
+            ? -(MATE_SCORE - ply)
+            : ((board.whiteToMove == rootSideIsWhite_) ? -cfg_.drawPenalty : cfg_.drawPenalty);
     }
 
-    // Prepare move ordering
-    if (!cfg_.useMovePicker) {
-        orderMoves(board, moves, hashMove, ply);
-    }
-
-    // Quiet tried list (fixed-size, no heap)
+    // Quiet tried list
     Move quietTried[64];
     int quietTriedN = 0;
 
     int bestScore = -1000000;
 
-    // Move iteration
     if (ply >= MAX_PLY) {
         bestMoveOut = NO_MOVE;
-        return evaluate(board); // or quiescence(board, alpha, beta, ply, timedOut)
+        return evaluate(board);
     }
 
     EngineMovePicker picker(board, moves, hashMove, killers_[0][ply], killers_[1][ply], true, history_);
@@ -754,16 +741,10 @@ int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int 
     int moveIndex = 0;
 
     while (true) {
-        if (cfg_.useMovePicker) {
-            if (!picker.next(mv)) break;
-        } else {
-            if (moveIndex >= moves.size) break;
-            mv = moves.m[moveIndex];
-        }
+        if (!picker.next(mv)) break;
 
         Undo u;
-
-        Move played = mv; 
+        Move played = mv;
         board.makeMove(played, u);
 
         const bool quiet = (!played.isCapture && !played.promotion);
@@ -772,40 +753,73 @@ int Engine::search(Board& board,int depth,int alpha,int beta,int startDepth,int 
         }
 
         int ext = 0;
-        if (cfg_.extendChecks && totalExtensions < cfg_.maxExtensionsPerLine) {
+        if (totalExtensions < cfg_.maxExtensionsPerLine) {
             if (board.amIInCheck(board.whiteToMove)) ext = 1;
         }
         ext = std::clamp(ext, 0, 2);
 
         int reduction = 0;
-        if (depth >= 4 &&
-            quiet &&
-            ext == 0 &&
-            moveIndex >= 3 &&
-            std::abs(alpha) < (MATE_THRESHOLD - 500) &&
-            !board.amIInCheck(board.whiteToMove))
-        {
+        if (depth >= 4 && quiet && ext == 0 && moveIndex >= 3 && std::abs(alpha) < (MATE_THRESHOLD - 500) && !board.amIInCheck(board.whiteToMove)){
             reduction = 1;
         }
 
         Move childBest = NO_MOVE;
-
         int score;
 
-        // PVS: first move full-window, rest null-window then re-search if needed (A/B with usePVS)
-        if (cfg_.usePVS && moveIndex > 0) {
-            int child = search(board, depth - 1 - reduction + ext, -(alpha + 1), -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
+        // PVS
+        if (moveIndex > 0) {
+            const int child = search(board,
+                                     depth - 1 - reduction + ext,
+                                     -(alpha + 1),
+                                     -alpha,
+                                     startDepth,
+                                     ply + 1,
+                                     totalExtensions + ext,
+                                     false,
+                                     childBest,
+                                     timedOut);
+
             score = -child;
 
-            if (!timedOut && score > alpha && score < beta) { score = -search(board, depth - 1 - reduction + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut); }
+            // IMPORTANT: with fail-soft scores, this condition behaves properly
+            if (!timedOut && score > alpha && score < beta) {
+                score = -search(board,
+                                depth - 1 - reduction + ext,
+                                -beta,
+                                -alpha,
+                                startDepth,
+                                ply + 1,
+                                totalExtensions + ext,
+                                false,
+                                childBest,
+                                timedOut);
+            }
         } else {
-            score = -search(board, depth - 1 - reduction + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, childBest, timedOut);
+            score = -search(board,
+                            depth - 1 - reduction + ext,
+                            -beta,
+                            -alpha,
+                            startDepth,
+                            ply + 1,
+                            totalExtensions + ext,
+                            false,
+                            childBest,
+                            timedOut);
         }
 
-        // LMR re-search (your existing behavior)
+        // LMR re-search
         if (!timedOut && reduction == 1 && score > alpha) {
             Move retryBest = NO_MOVE;
-            score = -search(board, depth - 1 + ext, -beta, -alpha, startDepth, ply + 1, totalExtensions + ext, false, retryBest, timedOut);
+            score = -search(board,
+                            depth - 1 + ext,
+                            -beta,
+                            -alpha,
+                            startDepth,
+                            ply + 1,
+                            totalExtensions + ext,
+                            false,
+                            retryBest,
+                            timedOut);
         }
 
         board.undoMove(played, u);
@@ -876,17 +890,42 @@ Move Engine::getMove(Board& board) {
 
     bool timedOut = false;
 
+    auto matePlies = [&](int s) -> int {
+        if (std::abs(s) < MATE_THRESHOLD) return 999999;
+        return MATE_SCORE - std::abs(s); // plies to mate from root
+    };
+
     for (int depth = 1; depth <= cfg_.maxDepth; ++depth) {
         Move rootBest = NO_MOVE;
         timedOut = false;
 
+        // If we're already in mate territory, aspiration is more harm than help.
+        const bool prevIsMate = (std::abs(prevScore) >= MATE_THRESHOLD);
+
         int alpha = -999999;
         int beta  =  999999;
 
-        if (cfg_.useAspiration && depth > 1) {
+        if (depth > 1 && !prevIsMate) {
             int window = cfg_.aspirationStartWindow;
             alpha = prevScore - window;
             beta  = prevScore + window;
+
+            if (cfg_.useOpeningBook) {
+                static OpeningBook book;
+                static bool loaded = false;
+
+                if (!loaded) {
+                    book.load("opening_book.bin");
+                    loaded = true;
+                }
+
+                Move bookMove;
+                if (book.probe(board.zobristHash, bookMove)) {
+                    std::cout << "Used opening book" << std::endl;
+                    return bookMove;
+                }
+            }
+
 
             while (true) {
                 rootBest = NO_MOVE;
@@ -916,7 +955,6 @@ Move Engine::getMove(Board& board) {
 
             if (timedOut) break;
 
-            // accept move
             if (rootBest.from != -1 && rootBest.to != -1) {
                 bestMove = rootBest;
                 bestScore = prevScore;
@@ -945,9 +983,32 @@ Move Engine::getMove(Board& board) {
 
         prevBest = bestMove;
 
-        if (std::abs(bestScore) >= MATE_THRESHOLD) break;
+        // Mate early exit: only stop once depth is sufficient to prove the mate distance.
+        const int m = matePlies(bestScore);
+        if (m != 999999) {
+            if (depth >= m) break;
+        }
+
         if (outOfTime()) break;
     }
 
     return bestMove;
+}
+
+size_t Engine::transpositionSize() const {
+    size_t used = 0;
+    for (const auto& e : tt_) {
+        if (e.depth != -1) ++used;
+    }
+    return used;
+}
+
+void Engine::printAfterMoveDebug(Engine& engine, Board& board) {
+    std::cout << "=====================Engine Move====================\n";
+    std::cout << "Mover: " << (engine.rootSideIsWhite_ ? "White" : "Black") << "\n";
+    std::cout << "Search depth reached: " << engine.lastDepth_ << "\n";
+    std::cout << "Positions evaluated: " << engine.lastNodes_ << "\n";
+    std::cout << "Eval: " << engine.lastEval_ << "\n";
+    board.printBoard(); 
+    std::cout << "====================================================\n";
 }

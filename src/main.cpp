@@ -98,7 +98,7 @@ void playAgainstComputer() {
 
     Board board;
     board.createBoard();
-    //board.createBoardFromFEN("2r3k1/2pb2pp/prq1pp2/Q2p4/1P1PnB2/P1p1PN1P/2P2PP1/2KR1R2 w - - 0 1");
+    //board.createBoardFromFEN("8/3B4/2P1pk2/p3b1p1/7p/P3P3/1P4R1/2K5 w - - 0 1");
     board.printBoard();
 
     BoardDisplay display;
@@ -275,7 +275,6 @@ void playAgainstComputer() {
                         return;
                     }
 
-                    // ---- REPLACED: getEngineMove2(board, timeLimit) ----
                     engine.setTimeLimitMs(timeLimit);
                     Move engineMove = engine.getMove(board);
 
@@ -283,15 +282,12 @@ void playAgainstComputer() {
                     board.makeMove(engineMove, u);
                     std::cout << engineMove.from << engineMove.to << std::endl;
                     board.lastMove = engineMove;
-                    board.printBoard();
+                    engine.printAfterMoveDebug(engine, board);
 
                     display.updatePieces(window, board);
-                    std::cout << "Engine move made" << std::endl;
 
                     isPlayerTurn = true;
 
-                    // If you want pondering back: you’d need a separate Engine instance in a worker thread,
-                    // plus a safe way to stop it and to share its “best line” (not just TT) with the main engine.
                     (void)ponderingOn;
                 }
 

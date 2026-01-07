@@ -411,9 +411,6 @@ Board::Board() {
     init_slider_pext_tables_once();
     initializeZobristTable();
     createBoard();
-    resize_tt(64);  // Calls the resize function to allocate memory
-    clear_tt();     // Clear the table to reset all entries
-    loadOpeningBook();
     maxHistoryValue = 0x0000000000000100ULL;
     //std::cout << "Number of entries in the transposition table: " << countTranspositionTableEntries() << std::endl;
 }
@@ -1837,7 +1834,7 @@ bool Board::isThreefoldRepetition() {
     // scan only since last irreversible move; step by 2 to check same side-to-move positions
     for (int i = repPly - 1; i >= repIrrevIndex; i -= 2) {
         if (repStack[i] == h) {
-            if (++count >= 3) return true;
+            if (++count >= 2) return true;
         }
     }
     return false;
@@ -1849,7 +1846,7 @@ bool Board::isThreefoldRepetition(uint64_t hash) {
     // scan only since last irreversible move; step by 2 to check same side-to-move positions
     for (int i = repPly - 1; i >= repIrrevIndex; i -= 2) {
         if (repStack[i] == hash) {
-            if (++count >= 3) return true;
+            if (++count >= 2) return true;
         }
     }
     return false; 
@@ -1932,59 +1929,6 @@ bool isKillerMove(const Move& move, const Board& board, int depth) {
     return (move == board.killerMoves[0][depth] || move == board.killerMoves[1][depth]);
  }
 
-void Board::resize_tt(uint64_t mb) {
-    size_t entries = (mb * 1048576ull) / sizeof(TT_Entry);
-    size_t new_entries = 1ull << (int)std::log2((double)entries);
-    transposition_table.resize(new_entries);
-    clear_tt();  // Clear the table to ensure all entries are reset after resizing
-}
-
-void Board::configureTranspositionTableSize(uint64_t sizeInMB) {
-    resize_tt(sizeInMB);
-}
-
-void Board::record_tt_entry(uint64_t hash_key, int score, TTFlag flag, Move move, int depth) {
-    TT_Entry& tt_entry = transposition_table[hash_key & (transposition_table.size() - 1)];
-
-    // Use deeper or exact information to replace existing entry
-    if (tt_entry.key != hash_key || depth > tt_entry.depth || flag == HASH_FLAG_EXACT) {
-        tt_entry.key = hash_key;
-        tt_entry.score = score;
-        tt_entry.flag = flag;
-        tt_entry.move = move;
-        tt_entry.depth = depth;
-    }
-}
-
-short Board::probe_tt_entry(uint64_t hash_key, int alpha, int beta, int depth, TT_Entry& return_entry) {
-    TT_Entry& tt_entry = transposition_table[hash_key & (transposition_table.size() - 1)];
-
-    if (tt_entry.key == hash_key) {
-        return_entry = tt_entry;  // Copy the found entry to return_entry
-
-        if (tt_entry.depth >= depth) {
-            if (tt_entry.flag == HASH_FLAG_EXACT) return RETURN_HASH_SCORE;
-            if (tt_entry.flag == HASH_FLAG_LOWER && tt_entry.score >= beta) return RETURN_HASH_SCORE;
-            if (tt_entry.flag == HASH_FLAG_UPPER && tt_entry.score <= alpha) return RETURN_HASH_SCORE;
-        }
-
-        return USE_HASH_MOVE;
-    }
-    return NO_HASH_ENTRY;
-}
-
-void Board::clear_tt() {
-    for (auto& tt_entry : transposition_table) {
-        tt_entry = TT_Entry();  // Reset each entry
-    }
-}
-
-TT_Entry* Board::probeTranspositionTable(uint64_t hash) {
-    if (transposition_table.empty()) return nullptr;
-    return &transposition_table[hash & (transposition_table.size() - 1)];
-}
-
-
 // Checking if it is a quiet position or not
 bool isNullViable(Board& board) {
     return board.whiteToMove ? 
@@ -2000,31 +1944,6 @@ std::istream& operator>>(std::istream& is, Move& move) {
     return is;
 }
 
-// Function to deserialize a TT_Entry object
-std::istream& operator>>(std::istream& is, TT_Entry& entry) {
-    is.read(reinterpret_cast<char*>(&entry.key), sizeof(entry.key));
-    is.read(reinterpret_cast<char*>(&entry.score), sizeof(entry.score));
-    is.read(reinterpret_cast<char*>(&entry.depth), sizeof(entry.depth));
-    is.read(reinterpret_cast<char*>(&entry.flag), sizeof(entry.flag));
-    is >> entry.move;
-    return is;
-}
-
-void Board::loadOpeningBook() {
-    std::string filename = "transposition_table.dat";
-    std::ifstream file2(filename, std::ios::binary);
-    if (!file2) {
-        std::cerr << "Failed to open file for reading: " << filename << std::endl;
-        return;
-    }
-    TT_Entry entry2;
-    while (file2 >> entry2) {
-        if (entry2.key != 0 && entry2.move.from != -1 && entry2.move.to != -1) {
-            record_tt_entry(entry2.key, 0, HASH_BOOK, entry2.move, 0);
-        }
-    }
-}
-
 // Function to convert a board position (e.g. "e2") to an index
 int boardPositionToIndex(const std::string& pos) {
     if (pos.size() != 2) return -1; // Invalid position
@@ -2038,26 +1957,33 @@ int boardPositionToIndex(const std::string& pos) {
     return rank * 8 + file;
 }
 
-// Function to convert move string (e.g., "e2e4") to a Move object
+// Function to convert move string (e.g., "e2e4" or "e7e8q") to a Move object
 Move convertToMoveObject(const std::string& moveStr) {
-    if (moveStr.size() != 4) return NO_MOVE; // Invalid move string
-    std::string fromStr = moveStr.substr(0, 2);
-    std::string toStr = moveStr.substr(2, 2);
+    // UCI is either:
+    // - 4 chars: e2e4
+    // - 5 chars: e7e8q (promotion: q/r/b/n)
+    if (moveStr.size() != 4 && moveStr.size() != 5) return NO_MOVE;
 
-    int from = boardPositionToIndex(fromStr);
-    int to = boardPositionToIndex(toStr);
+    const std::string fromStr = moveStr.substr(0, 2);
+    const std::string toStr   = moveStr.substr(2, 2);
 
-    return Move(from, to);
-}
+    const int from = boardPositionToIndex(fromStr);
+    const int to   = boardPositionToIndex(toStr);
 
-size_t Board::countTranspositionTableEntries() const {
-    size_t count = 0;
-    for (const auto& entry : transposition_table) {
-        if (entry.key != 0) {
-            ++count;
-        }
+    if (from < 0 || from >= 64 || to < 0 || to >= 64) return NO_MOVE;
+
+    Move m(from, to);
+
+    // Promotion: UCI uses lowercase q/r/b/n (sometimes uppercase appears in data)
+    if (moveStr.size() == 5) {
+        char p = moveStr[4];
+        if (p >= 'A' && p <= 'Z') p = char(p - 'A' + 'a');
+
+        if (p != 'q' && p != 'r' && p != 'b' && p != 'n') return NO_MOVE;
+        m.promotion = p;
     }
-    return count;
+
+    return m;
 }
 
 int clamp(int value, int max, int min) {
@@ -2079,141 +2005,3 @@ void Board::updateHistory(int from, int to, int bonus) {
         }
     }
 }
-/**
-* Functions once used to convert book moves into my engines format
-Move parseMove(const std::string& moveStr, Board board) {
-    // King side castle
-    if (moveStr == "'O-O'") {
-        if (board.whiteToMove) {
-            Move move(3, 1);
-            return move;
-        }
-        else {
-            Move move(59, 57);
-            return move;
-        }
-    }
-    else if (moveStr == "'O-O-O'") {
-        if (board.whiteToMove) {
-            Move move(3, 5);
-            return move;
-        }
-        else {
-            Move move(59, 61);
-            return move;
-        }
-    }
-    bool isCapture = moveStr.find('x') != std::string::npos;
-    char promotion = 0;
-    int startIndex = 1;
-    int expectedLength = 4;
-    if (isCapture) {
-        expectedLength += 1;
-        startIndex++;
-    }
-    if (moveStr.find('=') != std::string::npos) {
-        promotion = moveStr.back();
-        expectedLength += 2;
-    }
-
-    // Simplified example, does not handle disambiguation or pawn moves accurately
-    std::string toPos;
-    char pieceMoving = 'P';
-
-    if (isupper(moveStr[1])) {
-        // For non-pawn moves
-        startIndex++;
-        expectedLength++;
-        pieceMoving = moveStr[1];
-    }
-
-    int file = 0;
-    int rank = 0;
-    // checking disambiguation
-    if (size(moveStr) > expectedLength) {
-        char disambig = isupper(moveStr[1]) ? moveStr[2] : moveStr[1];
-        if (isalpha(disambig)) {
-            file = 'h' - disambig;
-        }
-        else {
-            rank = disambig - '1';
-        }
-        startIndex++;
-    }
-
-    toPos = moveStr.substr(startIndex, 2);
-    int toIndex = boardPositionToIndex(toPos);
-
-    std::vector<Move> moves;
-    Bitboard ownPieces = board.whiteToMove ? board.whitePieces : board.blackPieces;
-    Bitboard opponentPieces = board.whiteToMove ? board.blackPieces : board.whitePieces;
-    if (pieceMoving == 'P') {
-        moves = board.generatePawnMoves(board.whiteToMove ? board.whitePawns : board.blackPawns, ownPieces, opponentPieces);
-    }
-    else if (pieceMoving == 'N') {
-        moves = board.generateKnightMoves(board.whiteToMove ? board.whiteKnights : board.blackKnights, ownPieces, opponentPieces);
-    }
-    else if (pieceMoving == 'B') {
-        moves = board.generateBishopMoves(board.whiteToMove ? board.whiteBishops : board.blackBishops, ownPieces, opponentPieces);
-    }
-    else if (pieceMoving == 'R') {
-        moves = board.generateRookMoves(board.whiteToMove ? board.whiteRooks : board.blackRooks, ownPieces, opponentPieces);
-    }
-    else if (pieceMoving == 'Q') {
-        moves = board.generateQueenMoves(board.whiteToMove ? board.whiteQueens : board.blackQueens, ownPieces, opponentPieces);
-    }
-    else if (pieceMoving == 'K') {
-        moves = board.generateKingMoves(board.whiteToMove ? board.whiteKing : board.blackKing, ownPieces, opponentPieces);
-    }
-
-    for (Move move : moves) {
-
-        if (move.to == toIndex) {
-            if (!file && !rank) {
-                return move;
-            }
-            else if (file && (move.from % 8 == file)) {
-                return move;
-            }
-            else if (rank && (move.from / 8 == rank)) {
-                return move;
-            }
-        }
-    }
-    return Move();
-}
-
-void convertMoves(const std::string& input, Board& board) {
-    std::vector<Move> moveList;
-    std::istringstream inputStream(input);
-    std::string line;
-    while (std::getline(inputStream, line)) {
-        if (line.find('{') != std::string::npos && line.find('}') != std::string::npos) {
-            std::cout << board.countTranspositionTableEntries() << std::endl;
-            board.createBoard();
-            std::vector<std::string> movesVec;
-            std::string movesStr = line.substr(line.find('{') + 1, line.find('}') - line.find('{') - 1);
-            std::istringstream movesStream(movesStr);
-            std::string move;
-            while (std::getline(movesStream, move, ',')) {
-                move.erase(remove_if(move.begin(), move.end(), isspace), move.end()); // Remove spaces
-                movesVec.push_back(move);
-            }
-
-            for (const auto& moveStr : movesVec) {
-                Move move = parseMove(moveStr, board);
-                if (move.from == -1) {
-                    board.printBoard();
-                    std::cout << move.from << move.to << std::endl;
-                    break;
-                }
-                board.makeMove(move);
-                uint64_t hash = board.generateZobristHash();
-                TT_Entry* ttEntry = board.probeTranspositionTable(hash);
-                board.record_tt_entry(hash, 0, HASH_BOOK, move, 0);
-            }
-        }
-    }
-}
-
-*/

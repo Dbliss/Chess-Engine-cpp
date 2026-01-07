@@ -16,3 +16,6 @@ PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
 PLY 0  before getMove  whiteToMove=1  hash=6130493540923143946
 PLY 0  after getMove  from=8  to=16  promo=0
 PLY 1  before getMove  whiteToMove=0  hash=457553342737119226
+[TUNE] Baseline (B==A values) P=100 N=325 B=325 R=500 Q=975 -> B: W=72 D=54 L=74 | scoreB=0.495000
+[TUNE][RAND 1/12] P=85 N=327 B=381 R=564 Q=898 -> B: W=79 D=43 L=78 | scoreB=0.502500
+[TUNE][RAND 2/12] P=108 N=373 B=359 R=480 Q=1114 -> B: W=69 D=49 L=82 | scoreB=0.467500

@@ -18,6 +18,9 @@
 #include <optional>
 #include <algorithm>
 #include <bit>
+#include <iomanip>
+#include <random>
+#include <memory>
 
 // ---------------------------- helpers
 static void logLine(const std::string& s) {
@@ -180,12 +183,11 @@ struct MatchUI {
             }
         };
 
-        // Layout: consistent 44px rows + spacing (same vibe as your old UI)
+        // Layout: consistent 44px rows + spacing
         float y = 24.f;
         makeRow(rowDisplay,  y, 18, true);  y += 60.f;
         makeRow(rowSound,    y, 18, true);  y += 60.f;
 
-        // Requested order:
         makeRow(rowScore,    y, 18, false); y += 60.f;
         makeRow(rowPosition, y, 18, false); y += 60.f;
         makeRow(rowGame,     y, 18, false); y += 60.f;
@@ -193,7 +195,6 @@ struct MatchUI {
         makeRow(rowThink,    y, 18, true);  y += 60.f;
         makeRow(rowPaused,   y, 18, false); y += 60.f;
 
-        // Controls row: same style box, but taller + smaller font
         rowControls.clickable = false;
         rowControls.box.setPosition({ panelX + 16.f, y });
         rowControls.box.setSize({ panelW - 32.f, 120.f });
@@ -281,7 +282,6 @@ struct MatchUI {
               int thinkMsValue,
               bool paused) {
 
-        // dynamic text
         if (rowScore.label) {
             rowScore.label->setString(
                 "Score: A " + std::to_string(aWins) +
@@ -304,7 +304,6 @@ struct MatchUI {
 
         window.clear();
 
-        // Board area
         if (showBoard && display) {
             display->draw(window);
         } else {
@@ -315,7 +314,6 @@ struct MatchUI {
             window.draw(blank);
         }
 
-        // Panel background
         window.draw(panelBg);
 
         auto drawRow = [&](PanelRow& r) {
@@ -332,7 +330,6 @@ struct MatchUI {
         drawRow(rowPaused);
         drawRow(rowControls);
 
-        // Matchup label drawn under the game label (still inside the Game row box)
         if (font) {
             sf::Text matchup(*font, matchupLabel, 14);
             matchup.setFillColor(sf::Color(190, 190, 190));
@@ -358,6 +355,23 @@ static void applyResult(Stats& s, bool aWasWhite, GameResult r) {
     else s.bWins++;
 }
 
+static double scoreFromStatsForB(const Stats& s) {
+    if (s.games <= 0) return 0.0;
+    return (double)s.bWins / (double)s.games + 0.5 * ((double)s.draws / (double)s.games);
+}
+
+static double scoreFromStatsForA(const Stats& s) {
+    if (s.games <= 0) return 0.0;
+    return (double)s.aWins / (double)s.games + 0.5 * ((double)s.draws / (double)s.games);
+}
+
+static std::vector<std::string> selectFensForGames(const std::vector<std::string>& allFens, int totalGamesWanted) {
+    // We do 2 games per FEN (swap colors), so positions needed is ceil(totalGames/2)
+    const int positionsNeeded = (totalGamesWanted + 1) / 2;
+    if ((int)allFens.size() <= positionsNeeded) return allFens;
+    return std::vector<std::string>(allFens.begin(), allFens.begin() + positionsNeeded);
+}
+
 // ----------------------------
 static GameResult playOne(Board& board,
                          Engine& whiteEngine,
@@ -378,7 +392,6 @@ static GameResult playOne(Board& board,
     whiteEngine.newGame();
     blackEngine.newGame();
 
-    // local repetition tracking (threefold)
     std::unordered_map<uint64_t, int> rep;
     rep.reserve(2048);
     rep[board.zobristHash] = 1;
@@ -400,7 +413,6 @@ static GameResult playOne(Board& board,
     };
 
     for (int ply = 0; ply < maxPlies && !stopRequested.load(); ++ply) {
-        // --- UI events ---
         if (window) {
             while (auto ev = window->pollEvent()) {
                 if (ev->is<sf::Event::Closed>()) {
@@ -435,7 +447,6 @@ static GameResult playOne(Board& board,
             }
         }
 
-        // Pause loop
         while (paused.load() && !stopRequested.load()) {
             if (window) {
                 while (auto ev = window->pollEvent()) {
@@ -479,12 +490,10 @@ static GameResult playOne(Board& board,
 
         if (stopRequested.load()) break;
 
-        // draw by insufficient material
         if (isDrawByMaterial(board)) {
             return GameResult::Draw;
         }
 
-        // kings only draw (extra-fast)
         if ((std::popcount(board.whitePieces) == 1) && (std::popcount(board.blackPieces) == 1)) {
             return GameResult::Draw;
         }
@@ -498,17 +507,18 @@ static GameResult playOne(Board& board,
             return GameResult::Draw;
         }
 
-        auto containsMove = [&](const MoveList& ml, const Move& m) {
-            for (int i = 0; i < ml.size; ++i) if (ml.m[i] == m) return true;
-            return false;
-        };
-
         Engine& side = board.whiteToMove ? whiteEngine : blackEngine;
+        const bool moverWasWhite = board.whiteToMove;
+
         Move m = side.getMove(board);
+        const int depthReached = side.lastSearchDepth();
+        const int evalScore = side.lastEval();
+
         Undo u;
         board.makeMove(m, u);
 
-        // repetition
+        //printAfterMoveDebug(board, ply + 1, moverWasWhite, depthReached, evalScore);
+
         uint64_t h = board.zobristHash;
         int c = (++rep[h]);
         if (c >= 3) {
@@ -523,7 +533,6 @@ static GameResult playOne(Board& board,
             return GameResult::Draw;
         }
 
-        // update visuals (only if display is ON)
         if (display && window && ui) {
             if (ui->showBoard) {
                 display->updatePieces(*window, board);
@@ -540,6 +549,394 @@ static GameResult playOne(Board& board,
 }
 
 // ----------------------------
+// Generic A/B runner (this is the new reusable testing function)
+struct MatchRunConfig {
+    int totalGamesWanted = 200;   // total games (not positions). We’ll do color-swaps.
+    bool useUI = false;           // headless by default (important for tuning speed/noise)
+    bool verbose = true;
+};
+
+struct MatchResultAB {
+    Stats stats;
+    int totalGamesRequested = 0;
+    int totalGamesPlayed = 0;
+    double scoreA = 0.0; // points/game (win=1, draw=0.5)
+    double scoreB = 0.0;
+};
+
+static MatchResultAB runABMatchSeries(const std::vector<std::string>& allFens,
+                                     const EngineConfig& cfgAIn,
+                                     const EngineConfig& cfgBIn,
+                                     const MatchRunConfig& rcfg) {
+    MatchResultAB out;
+    out.totalGamesRequested = rcfg.totalGamesWanted;
+
+    // pick FEN subset once for this run
+    std::vector<std::string> fens = selectFensForGames(allFens, rcfg.totalGamesWanted);
+    const int maxGamesPossible = (int)fens.size() * 2;
+    const int totalGames = std::min(rcfg.totalGamesWanted, maxGamesPossible);
+
+    if (fens.empty() || totalGames <= 0) {
+        return out;
+    }
+
+    EngineConfig cfgA = cfgAIn;
+    EngineConfig cfgB = cfgBIn;
+
+    Engine engineA(cfgA);
+    Engine engineB(cfgB);
+
+    std::atomic<int> thinkMs{ cfgA.timeLimitMs };
+    std::atomic<bool> paused{ false };
+    std::atomic<bool> stopRequested{ false };
+
+    std::unique_ptr<BoardDisplay> display;
+    std::unique_ptr<sf::RenderWindow> window;
+    MatchUI ui;
+
+    std::unique_ptr<sf::Font> font;
+    const sf::Font* fontPtr = nullptr;
+
+    float boardPx = 0.f;
+    float panelW  = 280.f;
+
+    if (rcfg.useUI) {
+        display = std::make_unique<BoardDisplay>();
+        boardPx = display->tileSize * 8.f;
+
+        window = std::make_unique<sf::RenderWindow>(
+            sf::VideoMode({ (unsigned)(boardPx + panelW), (unsigned)(boardPx) }),
+            "Engine A/B Match"
+        );
+
+        font = std::make_unique<sf::Font>();
+        if (font->openFromFile("sansation.ttf")) {
+            fontPtr = font.get();
+        } else {
+            std::cerr << "Warning: sansation.ttf not found; panel boxes still render but text will be missing.\n";
+        }
+
+        ui.panelW = panelW;
+        ui.init(boardPx, fontPtr);
+    }
+
+    Stats stats;
+    Board board;
+
+    int gamesPlayed = 0;
+
+    if (rcfg.verbose) {
+        std::cout << "Running A/B: " << totalGames << " games using " << fens.size() << " positions.\n";
+        std::cout << "Time(ms): A=" << cfgA.timeLimitMs << " B=" << cfgB.timeLimitMs << "\n";
+    }
+
+    for (size_t i = 0; i < fens.size() && !stopRequested.load() && gamesPlayed < totalGames; ++i) {
+        const std::string& fenStr = fens[i];
+        int posIndex1Based = (int)i + 1;
+
+        // Game 1: A(W) vs B(B)
+        if (gamesPlayed < totalGames) {
+            board.createBoardFromFEN(fenStr);
+            board.zobristHash = board.generateZobristHash();
+
+            engineA.setTimeLimitMs(thinkMs.load());
+            engineB.setTimeLimitMs(thinkMs.load());
+
+            gamesPlayed++;
+            const int gameInPos = 1;
+            const int gamesThisPos = (totalGames - gamesPlayed + 1 >= 1) ? 2 : 1; // UI nicety; not critical
+
+            std::string matchup = "A(W) vs B(B)  [" + std::to_string(gamesPlayed) + "/" + std::to_string(totalGames) + "]";
+
+            GameResult r = playOne(board, engineA, engineB,
+                                   (window && window->isOpen()) ? window.get() : nullptr,
+                                   (window && window->isOpen()) ? display.get() : nullptr,
+                                   (window && window->isOpen()) ? &ui : nullptr,
+                                   thinkMs, paused, stopRequested,
+                                   stats.aWins, stats.draws, stats.bWins,
+                                   posIndex1Based, (int)fens.size(),
+                                   gameInPos, 2,
+                                   matchup,
+                                   cfgA.maxGamePlies);
+
+            applyResult(stats, true, r);
+        }
+
+        // Game 2: B(W) vs A(B)
+        if (gamesPlayed < totalGames && !stopRequested.load()) {
+            board.createBoardFromFEN(fenStr);
+            board.zobristHash = board.generateZobristHash();
+
+            engineA.setTimeLimitMs(thinkMs.load());
+            engineB.setTimeLimitMs(thinkMs.load());
+
+            gamesPlayed++;
+            const int gameInPos = 2;
+
+            std::string matchup = "B(W) vs A(B)  [" + std::to_string(gamesPlayed) + "/" + std::to_string(totalGames) + "]";
+
+            GameResult r = playOne(board, engineB, engineA,
+                                   (window && window->isOpen()) ? window.get() : nullptr,
+                                   (window && window->isOpen()) ? display.get() : nullptr,
+                                   (window && window->isOpen()) ? &ui : nullptr,
+                                   thinkMs, paused, stopRequested,
+                                   stats.aWins, stats.draws, stats.bWins,
+                                   posIndex1Based, (int)fens.size(),
+                                   gameInPos, 2,
+                                   matchup,
+                                   cfgA.maxGamePlies);
+
+            applyResult(stats, false, r);
+        }
+
+        if (rcfg.verbose) {
+            std::cout << "After pos " << posIndex1Based << ": "
+                      << "A wins=" << stats.aWins
+                      << " | B wins=" << stats.bWins
+                      << " | draws=" << stats.draws
+                      << " | games=" << stats.games
+                      << "\n";
+        }
+    }
+
+    out.stats = stats;
+    out.totalGamesPlayed = stats.games;
+    out.scoreA = scoreFromStatsForA(stats);
+    out.scoreB = scoreFromStatsForB(stats);
+
+    if (rcfg.verbose) {
+        std::cout << "\nFinal: "
+                  << "A wins=" << stats.aWins
+                  << " | B wins=" << stats.bWins
+                  << " | draws=" << stats.draws
+                  << " | games=" << stats.games
+                  << "\n";
+        std::cout << "Score: A=" << std::fixed << std::setprecision(4) << out.scoreA
+                  << " | B=" << out.scoreB << "\n";
+    }
+
+    return out;
+}
+
+// ----------------------------
+// Piece-value tuning
+
+struct PieceValues {
+    int pawn   = 100;
+    int knight = 325;
+    int bishop = 325;
+    int rook   = 500;
+    int queen  = 975;
+};
+
+static void applyPieceValues(EngineConfig& cfg, const PieceValues& pv) {
+    cfg.pawnValue   = pv.pawn;
+    cfg.knightValue = pv.knight;
+    cfg.bishopValue = pv.bishop;
+    cfg.rookValue   = pv.rook;
+    cfg.queenValue  = pv.queen;
+}
+
+static PieceValues getPieceValuesFromCfg(const EngineConfig& cfg) {
+    PieceValues pv;
+    pv.pawn   = cfg.pawnValue;
+    pv.knight = cfg.knightValue;
+    pv.bishop = cfg.bishopValue;
+    pv.rook   = cfg.rookValue;
+    pv.queen  = cfg.queenValue;
+    return pv;
+}
+
+static std::string pvToString(const PieceValues& pv) {
+    return "P=" + std::to_string(pv.pawn) +
+           " N=" + std::to_string(pv.knight) +
+           " B=" + std::to_string(pv.bishop) +
+           " R=" + std::to_string(pv.rook) +
+           " Q=" + std::to_string(pv.queen);
+}
+
+static int clampInt(int v, int lo, int hi) {
+    return std::max(lo, std::min(hi, v));
+}
+
+static void clampPieceValues(PieceValues& pv) {
+    // sane-ish bounds so random search doesn't do something dumb
+    pv.pawn   = clampInt(pv.pawn,   60,  140);
+    pv.knight = clampInt(pv.knight, 200, 500);
+    pv.bishop = clampInt(pv.bishop, 200, 500);
+    pv.rook   = clampInt(pv.rook,   300, 800);
+    pv.queen  = clampInt(pv.queen,  600, 1400);
+}
+
+struct PieceTuningConfig {
+    int gamesPerEval = 200;
+
+    // Keep this bounded or you’ll end up doing thousands of games per tuning pass
+    int randomTrials = 12;
+    int hillClimbEvals = 18;
+
+    // step schedule for the local search
+    std::vector<int> steps = { 25, 15, 10, 5 };
+
+    // accept only if B gains at least this many "points" over best (win=1, draw=0.5)
+    // 200 games => 1 point = 0.005 score
+    double minPointGainToAccept = 2.0; // i.e. +2 points over 200 games (≈ +1% absolute score)
+};
+
+static PieceValues tunePieceValuesVsBaseline(const std::vector<std::string>& allFens,
+                                            const EngineConfig& baselineCfgA,
+                                            const PieceTuningConfig& tc) {
+    // Fix the position subset once so every candidate is compared on the same set.
+    std::vector<std::string> fensFixed = selectFensForGames(allFens, tc.gamesPerEval);
+    const int maxGamesPossible = (int)fensFixed.size() * 2;
+    const int totalGames = std::min(tc.gamesPerEval, maxGamesPossible);
+
+    if (fensFixed.empty() || totalGames <= 0) {
+        std::cerr << "Not enough FENs to run tuning.\n";
+        return getPieceValuesFromCfg(baselineCfgA);
+    }
+
+    MatchRunConfig rcfg;
+    rcfg.totalGamesWanted = totalGames;
+    rcfg.useUI = false;
+    rcfg.verbose = false;
+
+    auto evalCandidate = [&](const PieceValues& pv) -> MatchResultAB {
+        EngineConfig cfgB = baselineCfgA;
+        applyPieceValues(cfgB, pv);
+        return runABMatchSeries(fensFixed, baselineCfgA, cfgB, rcfg);
+    };
+
+    auto pointsB = [](const MatchResultAB& r) -> double {
+        return (double)r.stats.bWins + 0.5 * (double)r.stats.draws;
+    };
+
+    // start at baseline values (so we measure improvements vs "old")
+    PieceValues best = getPieceValuesFromCfg(baselineCfgA);
+    clampPieceValues(best);
+
+    MatchResultAB bestRes = evalCandidate(best);
+    double bestPoints = pointsB(bestRes);
+
+    {
+        std::string s = "[TUNE] Baseline (B==A values) "
+            + pvToString(best)
+            + " -> B: W=" + std::to_string(bestRes.stats.bWins)
+            + " D=" + std::to_string(bestRes.stats.draws)
+            + " L=" + std::to_string(bestRes.stats.aWins)
+            + " | scoreB=" + std::to_string(bestRes.scoreB);
+        std::cout << s << "\n";
+        logLine(s);
+    }
+
+    // ----------------------------
+    // Stage 1: random search (bounded)
+    std::mt19937 rng(123456u);
+    std::uniform_int_distribution<int> dP(-20, 20);
+    std::uniform_int_distribution<int> dN(-60, 60);
+    std::uniform_int_distribution<int> dB(-60, 60);
+    std::uniform_int_distribution<int> dR(-80, 80);
+    std::uniform_int_distribution<int> dQ(-160, 160);
+
+    for (int t = 0; t < tc.randomTrials; ++t) {
+        PieceValues cand = best;
+        cand.pawn   += dP(rng);
+        cand.knight += dN(rng);
+        cand.bishop += dB(rng);
+        cand.rook   += dR(rng);
+        cand.queen  += dQ(rng);
+        clampPieceValues(cand);
+
+        MatchResultAB r = evalCandidate(cand);
+        double p = pointsB(r);
+
+        std::string line = "[TUNE][RAND " + std::to_string(t+1) + "/" + std::to_string(tc.randomTrials) + "] "
+            + pvToString(cand)
+            + " -> B: W=" + std::to_string(r.stats.bWins)
+            + " D=" + std::to_string(r.stats.draws)
+            + " L=" + std::to_string(r.stats.aWins)
+            + " | scoreB=" + std::to_string(r.scoreB);
+        std::cout << line << "\n";
+        logLine(line);
+
+        if (p > bestPoints + tc.minPointGainToAccept) {
+            best = cand;
+            bestRes = r;
+            bestPoints = p;
+
+            std::string acc = "  ACCEPT -> best now " + pvToString(best) + " (scoreB=" + std::to_string(bestRes.scoreB) + ")";
+            std::cout << acc << "\n";
+            logLine(acc);
+        }
+    }
+
+    // ----------------------------
+    // Stage 2: local hill-climb around best (bounded eval count)
+    int evalsUsed = 0;
+    for (int step : tc.steps) {
+        bool improved = true;
+        while (improved && evalsUsed < tc.hillClimbEvals) {
+            improved = false;
+
+            auto tryDelta = [&](auto applyDelta, const char* tag) {
+                if (evalsUsed >= tc.hillClimbEvals) return;
+
+                PieceValues cand = best;
+                applyDelta(cand);
+                clampPieceValues(cand);
+
+                MatchResultAB r = evalCandidate(cand);
+                evalsUsed++;
+                double p = pointsB(r);
+
+                std::string line = "[TUNE][HC step=" + std::to_string(step) + " " + std::string(tag) + "] "
+                    + pvToString(cand)
+                    + " -> B: W=" + std::to_string(r.stats.bWins)
+                    + " D=" + std::to_string(r.stats.draws)
+                    + " L=" + std::to_string(r.stats.aWins)
+                    + " | scoreB=" + std::to_string(r.scoreB);
+                std::cout << line << "\n";
+                logLine(line);
+
+                if (p > bestPoints + tc.minPointGainToAccept) {
+                    best = cand;
+                    bestRes = r;
+                    bestPoints = p;
+                    improved = true;
+
+                    std::string acc = "  ACCEPT -> best now " + pvToString(best) + " (scoreB=" + std::to_string(bestRes.scoreB) + ")";
+                    std::cout << acc << "\n";
+                    logLine(acc);
+                }
+            };
+
+            // Coordinate-ish steps (±step on each value)
+            tryDelta([&](PieceValues& c){ c.pawn += step; },   "+P");
+            tryDelta([&](PieceValues& c){ c.pawn -= step; },   "-P");
+            tryDelta([&](PieceValues& c){ c.knight += step; }, "+N");
+            tryDelta([&](PieceValues& c){ c.knight -= step; }, "-N");
+            tryDelta([&](PieceValues& c){ c.bishop += step; }, "+B");
+            tryDelta([&](PieceValues& c){ c.bishop -= step; }, "-B");
+            tryDelta([&](PieceValues& c){ c.rook += step; },   "+R");
+            tryDelta([&](PieceValues& c){ c.rook -= step; },   "-R");
+            tryDelta([&](PieceValues& c){ c.queen += step; },  "+Q");
+            tryDelta([&](PieceValues& c){ c.queen -= step; },  "-Q");
+        }
+    }
+
+    std::string done = "[TUNE] DONE -> best " + pvToString(best)
+        + " | B: W=" + std::to_string(bestRes.stats.bWins)
+        + " D=" + std::to_string(bestRes.stats.draws)
+        + " L=" + std::to_string(bestRes.stats.aWins)
+        + " | scoreB=" + std::to_string(bestRes.scoreB);
+    std::cout << done << "\n";
+    logLine(done);
+
+    return best;
+}
+
+// ----------------------------
+// MAIN
 int main() {
     initializeZobristTable();
 
@@ -552,126 +949,52 @@ int main() {
         return 1;
     }
 
-    // Force first x positions only
-    int numGames = 100;
-    if ((int)fens.size() > numGames) fens.resize(numGames);
+    // ---- choose mode here (no CLI args) ----
+    constexpr bool kTunePieceValues = false;   // <- set false to go back to normal A vs B match UI
+    constexpr bool kShowUIInMatch   = true;   // only used when kTunePieceValues==false
 
     // ---------------- Configure engines ----------------
-    // Assumption: everything ON for both to start.
+    // Engine A baseline (default)
     EngineConfig cfgA;
+    cfgA.timeLimitMs = 1000;
+
+    // Engine B starts as same as A (baseline), then we tune only piece values
     EngineConfig cfgB = cfgA;
-    cfgB.useAspiration = true;
 
-    // Example difference knobs (edit however you want)
-    //cfgB.quiescenceIncludeChecks = true;
+    if constexpr (kTunePieceValues) {
+        PieceTuningConfig tc;
+        tc.gamesPerEval = 200; // exactly what you asked for (unless not enough FENs)
+        tc.randomTrials = 12;
+        tc.hillClimbEvals = 18;
+        tc.steps = { 25, 15, 10, 5 };
+        tc.minPointGainToAccept = 2.0;
 
-    Engine engineA(cfgA);
-    Engine engineB(cfgB);
+        PieceValues best = tunePieceValuesVsBaseline(fens, cfgA, tc);
 
-    // ---------------- Visual board + UI panel ----------------
-    BoardDisplay display;
-    float boardPx = display.tileSize * 8.f;
-    float panelW  = 280.f;
+        std::cout << "\nBEST PIECE VALUES FOUND:\n";
+        std::cout << "  pawnValue   = " << best.pawn   << "\n";
+        std::cout << "  knightValue = " << best.knight << "\n";
+        std::cout << "  bishopValue = " << best.bishop << "\n";
+        std::cout << "  rookValue   = " << best.rook   << "\n";
+        std::cout << "  queenValue  = " << best.queen  << "\n";
 
-    sf::RenderWindow window(
-        sf::VideoMode({ (unsigned)(boardPx + panelW), (unsigned)(boardPx) }),
-        "Engine Match (A vs B)"
-    );
-
-    sf::Font font;
-    const sf::Font* fontPtr = nullptr;
-    if (font.openFromFile("sansation.ttf")) {
-        fontPtr = &font;
-    } else {
-        std::cerr << "Warning: sansation.ttf not found; panel boxes still render but text will be missing.\n";
+        return 0;
     }
 
-    MatchUI ui;
-    ui.panelW = panelW;
-    ui.init(boardPx, fontPtr);
+    // ---------------- Normal A/B match (optional UI) ----------------
+    // Example A/B: keep A default, change B however you want (still uses the new runner)
+    cfgB.useOpeningBook = false; // or keep identical, etc.
 
-    std::atomic<int> thinkMs{ cfgA.timeLimitMs };
-    std::atomic<bool> paused{ false };
-    std::atomic<bool> stopRequested{ false };
+    MatchRunConfig rcfg;
+    rcfg.totalGamesWanted = 200; // total games
+    rcfg.useUI = kShowUIInMatch;
+    rcfg.verbose = true;
 
-    Stats stats;
-    Board board;
+    MatchResultAB r = runABMatchSeries(fens, cfgA, cfgB, rcfg);
 
-    // totalGames is always 2 per position for this UI
-    int totalGames = (int)fens.size() * 2;
-    int gameCounter = 0;
-
-    std::cout << "Loaded " << fens.size() << " positions -> " << totalGames << " games.\n";
-    std::cout << "Controls: [+] faster, [-] slower, [Space] pause, [Esc] stop, [D] display, [M] mute.\n\n";
-
-    for (size_t i = 0; i < fens.size() && !stopRequested.load(); ++i) {
-        const std::string& fenStr = fens[i];
-        int posIndex1Based = (int)i + 1;
-
-        // Game 1: A(W) vs B(B)
-        board.createBoardFromFEN(fenStr);
-        board.zobristHash = board.generateZobristHash();
-        {
-            gameCounter++;
-            std::string matchup = "Matchup: A(W) vs B(B)";
-
-            engineA.setTimeLimitMs(thinkMs.load());
-            engineB.setTimeLimitMs(thinkMs.load());
-
-            GameResult r = playOne(board, engineA, engineB,
-                                   window.isOpen() ? &window : nullptr,
-                                   window.isOpen() ? &display : nullptr,
-                                   window.isOpen() ? &ui : nullptr,
-                                   thinkMs, paused, stopRequested,
-                                   stats.aWins, stats.draws, stats.bWins,
-                                   posIndex1Based, (int)fens.size(),
-                                   gameCounter, 2,
-                                   matchup,
-                                   cfgA.maxGamePlies);
-
-            applyResult(stats, true, r);
-        }
-
-        if (stopRequested.load()) break;
-
-        // Game 2: B(W) vs A(B)
-        board.createBoardFromFEN(fenStr);
-        board.zobristHash = board.generateZobristHash();
-        {
-            gameCounter++;
-            std::string matchup = "Matchup: B(W) vs A(B)";
-
-            engineA.setTimeLimitMs(thinkMs.load());
-            engineB.setTimeLimitMs(thinkMs.load());
-
-            GameResult r = playOne(board, engineB, engineA,
-                                   window.isOpen() ? &window : nullptr,
-                                   window.isOpen() ? &display : nullptr,
-                                   window.isOpen() ? &ui : nullptr,
-                                   thinkMs, paused, stopRequested,
-                                   stats.aWins, stats.draws, stats.bWins,
-                                   posIndex1Based, (int)fens.size(),
-                                   gameCounter, 2,
-                                   matchup,
-                                   cfgA.maxGamePlies);
-
-            applyResult(stats, false, r);
-        }
-
-        std::cout << "After pos " << posIndex1Based << ": "
-                  << "A wins=" << stats.aWins
-                  << " | B wins=" << stats.bWins
-                  << " | draws=" << stats.draws
-                  << " | games=" << stats.games
-                  << "\n";
-    }
-
-    std::cout << "\nFinal: "
-              << "A wins=" << stats.aWins
-              << " | B wins=" << stats.bWins
-              << " | draws=" << stats.draws
-              << " | games=" << stats.games
-              << "\n";
+    std::cout << "\nFinal Score:\n";
+    std::cout << "A: W=" << r.stats.aWins << " D=" << r.stats.draws << " L=" << r.stats.bWins << " | scoreA=" << r.scoreA << "\n";
+    std::cout << "B: W=" << r.stats.bWins << " D=" << r.stats.draws << " L=" << r.stats.aWins << " | scoreB=" << r.scoreB << "\n";
 
     return 0;
 }

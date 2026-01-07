@@ -16,6 +16,16 @@ add_executable(ChessEngine
     src/engine.cpp
     src/BoardDisplay.cpp
     src/zobrist.cpp
+    src/opening_book.cpp
+)
+
+add_executable(EngineTuning
+    src/engine_tuning.cpp
+    src/chess.cpp
+    src/engine.cpp
+    src/BoardDisplay.cpp
+    src/zobrist.cpp
+    src/opening_book.cpp
 )
 
 add_executable(PerftSuite
@@ -30,11 +40,9 @@ add_executable(perft_cli
     src/zobrist.cpp
 )
 
-add_executable(EngineTuning
-    src/engine_tuning.cpp
+add_executable(book_builder
+    src/book_builder.cpp
     src/chess.cpp
-    src/engine.cpp
-    src/BoardDisplay.cpp
     src/zobrist.cpp
 )
 
